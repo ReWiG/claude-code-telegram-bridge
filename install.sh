@@ -17,7 +17,10 @@ echo ""
 
 read -r -p "▸ Telegram bot token: " TG_TOKEN
 read -r -p "▸ Chat ID: " CHAT_ID
-read -r -p "▸ SOCKS5 прокси (оставь пустым если не нужен): " PROXY
+read -r -p "▸ SOCKS5 прокси (например socks5://127.0.0.1:10808, оставь пустым если не нужен): " PROXY
+if [ -n "$PROXY" ] && [[ ! "$PROXY" =~ ^socks5?:// ]]; then
+    echo "⚠ Предупреждение: прокси должен начинаться с socks5:// или socks://"
+fi
 echo ""
 
 # 1. Copy files
