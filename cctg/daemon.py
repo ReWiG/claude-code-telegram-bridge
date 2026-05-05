@@ -91,13 +91,14 @@ class Daemon:
                 await asyncio.sleep(5)
 
     async def _discover_session_ttys(self) -> None:
-        """Find TTY and PID for sessions that don't have them yet."""
+        """Find TTY and PID for sessions that don't have them yet by matching CWD."""
         import os
         sessions = await self.db.list_active_sessions()
         for s in sessions:
             if s.get("tty") and s.get("pid"):
                 continue
-            # Scan /proc for claude processes
+            session_cwd = s.get("cwd", "")
+            # Scan /proc for claude processes, match by CWD
             try:
                 for pid_str in os.listdir("/proc"):
                     if not pid_str.isdigit():
@@ -111,6 +112,13 @@ class Daemon:
                             cmdline = f.read()
                         if b"claude" not in cmdline:
                             continue
+                        # Match by working directory
+                        try:
+                            cwd_link = os.readlink(f"/proc/{pid_str}/cwd")
+                        except OSError:
+                            continue
+                        if cwd_link != session_cwd:
+                            continue
                         fd_path = f"/proc/{pid_str}/fd/0"
                         if os.path.exists(fd_path):
                             link = os.readlink(fd_path)
@@ -120,7 +128,8 @@ class Daemon:
                                     (pid, link, s["session_id"]),
                                 )
                                 await self.db._conn.commit()
-                                logger.info("Discovered TTY for session %s: %s (PID %d)", s["session_id"][:8], link, pid)
+                                logger.info("Discovered TTY for session %s: %s (PID %d, cwd %s)",
+                                            s["session_id"][:8], link, pid, cwd_link)
                                 break
                     except (OSError, PermissionError, ValueError):
                         continue

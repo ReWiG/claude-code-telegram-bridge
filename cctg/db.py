@@ -176,9 +176,6 @@ class Database:
     async def reset_on_startup(self) -> None:
         await self._conn.execute("DELETE FROM pending_events")
         await self._conn.execute("DELETE FROM live_messages")
-        await self._conn.execute(
-            "UPDATE sessions SET status = 'exited', exited_at = ? WHERE status = 'active'",
-            (int(time.time()),),
-        )
         await self._conn.execute("DELETE FROM state")
         await self._conn.commit()
+        # Note: sessions are NOT cleared — dead ones will be detected by _detect_exited_sessions
