@@ -121,12 +121,19 @@ class TelegramHandler:
         watch = await self.db.get_state("watch_active")
         attached_id = await self.db.get_state("attached_session")
         if not watch or not attached_id:
+            logger.debug("handle_message: watch=%s attached=%s — skipping", watch, attached_id)
             return "", None
         session = await self.db.get_session(attached_id)
         if not session or not session.get("tty"):
+            logger.debug("handle_message: no session or TTY — skipping")
             return "", None
-        self.tty.write_text(text, session["tty"])
-        return "", None
+        tty = session["tty"]
+        ok = self.tty.write_text(text, tty)
+        if ok:
+            logger.info("→ %s: %s", tty, text[:100])
+        else:
+            logger.error("FAILED to write to %s", tty)
+        return "✅", None
 
     async def handle_callback(self, callback_data: str) -> None:
         parts = callback_data.split("|", 1)
@@ -294,7 +301,9 @@ class TelegramHandler:
                 await update.message.reply_text(resp_text, reply_markup=kb, parse_mode="HTML")
             return
 
-        await self.handle_message(text)
+        resp, kb = await self.handle_message(text)
+        if resp:
+            await update.message.reply_text(resp, reply_markup=kb, parse_mode="HTML")
 
     def _build_kb(self, attached: bool = False, tracking: bool = False) -> ReplyKeyboardMarkup:
         buttons = []
