@@ -13,10 +13,16 @@ dependencies = [
     "aiofiles>=23.0",
     "watchdog>=3.0",
     "tomli>=2.0; python_version < '3.11'",
+    "pytest>=9.0.3",
 ]
 
 [tool.setuptools.packages.find]
 exclude = ["data", "data.*"]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.3",
+]
 
 [project.scripts]
 cctg = "cctg.__main__:main"
