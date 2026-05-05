@@ -15,7 +15,7 @@ class TTYRouter:
         """Write arbitrary text to a TTY. Returns True on success."""
         try:
             with open(tty_path, "w") as f:
-                f.write(text + "\n")
+                f.write(text + "\r")
             return True
         except (OSError, PermissionError):
             return False
