@@ -49,10 +49,11 @@ class Daemon:
             proxy=self.config.telegram_proxy,
         )
         await self.telegram.start()
+        logger.info("Telegram handler started, updater should be polling now")
 
         self._write_pid()
         self._running = True
-        logger.info("Daemon started")
+        logger.info("Daemon started, entering main loop")
 
         await self._main_loop()
 
@@ -75,6 +76,8 @@ class Daemon:
                 await self._poll_transcripts()
 
                 ticks += 1
+                if ticks % 5 == 0:
+                    await self._discover_session_ttys()
                 if ticks % cleanup_interval == 0:
                     await self.cleanup_worker._detect_exited_sessions()
 
@@ -82,6 +85,43 @@ class Daemon:
             except Exception as e:
                 logger.error(f"Main loop error: {e}", exc_info=True)
                 await asyncio.sleep(5)
+
+    async def _discover_session_ttys(self) -> None:
+        """Find TTY and PID for sessions that don't have them yet."""
+        import os
+        sessions = await self.db.list_active_sessions()
+        for s in sessions:
+            if s.get("tty") and s.get("pid"):
+                continue
+            # Scan /proc for claude processes
+            try:
+                for pid_str in os.listdir("/proc"):
+                    if not pid_str.isdigit():
+                        continue
+                    try:
+                        pid = int(pid_str)
+                        cmdline_path = f"/proc/{pid_str}/cmdline"
+                        if not os.path.exists(cmdline_path):
+                            continue
+                        with open(cmdline_path, "rb") as f:
+                            cmdline = f.read()
+                        if b"claude" not in cmdline:
+                            continue
+                        fd_path = f"/proc/{pid_str}/fd/0"
+                        if os.path.exists(fd_path):
+                            link = os.readlink(fd_path)
+                            if link.startswith("/dev/"):
+                                await self.db._conn.execute(
+                                    "UPDATE sessions SET pid=?, tty=? WHERE session_id=? AND pid IS NULL",
+                                    (pid, link, s["session_id"]),
+                                )
+                                await self.db._conn.commit()
+                                logger.info("Discovered TTY for session %s: %s (PID %d)", s["session_id"][:8], link, pid)
+                                break
+                    except (OSError, PermissionError, ValueError):
+                        continue
+            except (OSError, PermissionError):
+                pass
 
     async def _process_pending_events(self) -> None:
         events = await self.db.get_unprocessed_events()
