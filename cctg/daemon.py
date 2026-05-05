@@ -5,6 +5,7 @@ import asyncio
 import logging
 import os
 import signal
+import time
 
 from cctg.config import Config
 from cctg.db import Database
@@ -67,7 +68,8 @@ class Daemon:
 
     async def _main_loop(self) -> None:
         cleanup_interval = self.config.session_cleanup_seconds
-        ticks = 0
+        last_discovery = 0
+        last_cleanup = 0
 
         while self._running:
             try:
@@ -75,11 +77,13 @@ class Daemon:
                 await self._process_pending_events()
                 await self._poll_transcripts()
 
-                ticks += 1
-                if ticks % 5 == 0:
+                now = time.time()
+                if now - last_discovery >= 5:
                     await self._discover_session_ttys()
-                if ticks % cleanup_interval == 0:
+                    last_discovery = now
+                if now - last_cleanup >= cleanup_interval:
                     await self.cleanup_worker._detect_exited_sessions()
+                    last_cleanup = now
 
                 await asyncio.sleep(1)
             except Exception as e:
