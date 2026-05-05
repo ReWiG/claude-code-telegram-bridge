@@ -34,6 +34,7 @@ class TelegramHandler:
         builder = Application.builder().token(self.token)
         if self._proxy:
             builder.proxy(self._proxy)
+            builder.get_updates_proxy(self._proxy)
         self.app = builder.build()
 
         self.app.add_handler(CommandHandler("list", self._cmd_list))
@@ -49,11 +50,15 @@ class TelegramHandler:
 
         await self.app.initialize()
         await self.app.start()
-        await self.app.updater.start_polling(allowed_updates=["message", "callback_query"])
+        await self.app.updater.start_polling(allowed_updates=["message", "callback_query"], timeout=2, poll_interval=0.5)
+        logger.info("Updater running: %s", self.app.updater.running)
 
     async def stop(self) -> None:
         if self.app:
-            await self.app.updater.stop()
+            try:
+                await self.app.updater.stop()
+            except RuntimeError:
+                pass
             await self.app.stop()
             await self.app.shutdown()
 

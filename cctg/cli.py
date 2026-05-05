@@ -91,25 +91,28 @@ def cmd_daemon(args):
     )
 
     cfg = get_config(args.config)
-    loop = asyncio.new_event_loop()
-    daemon = Daemon(cfg)
 
-    def _shutdown():
-        loop.create_task(daemon.stop())
+    async def _run():
+        daemon = Daemon(cfg)
+        loop = asyncio.get_running_loop()
 
-    for sig in (signal.SIGINT, signal.SIGTERM):
+        def _shutdown():
+            loop.create_task(daemon.stop())
+
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            try:
+                loop.add_signal_handler(sig, _shutdown)
+            except NotImplementedError:
+                pass
+
         try:
-            loop.add_signal_handler(sig, _shutdown)
-        except NotImplementedError:
+            await daemon.start()
+        except KeyboardInterrupt:
             pass
+        finally:
+            await daemon.stop()
 
-    try:
-        loop.run_until_complete(daemon.start())
-    except KeyboardInterrupt:
-        pass
-    finally:
-        loop.run_until_complete(daemon.stop())
-        loop.close()
+    asyncio.run(_run())
 
 
 def cmd_install(args):
