@@ -32,12 +32,24 @@ if [ -f "$SETTINGS_FILE" ]; then
     echo "→ Удаление хуков cctg из $SETTINGS_FILE ..."
     python3 -c "
 import json
+
+def has_cctg(hook_entry):
+    '''Check if a hook entry (old or new format) references cctg.'''
+    # New format: {'matcher': '', 'hooks': [{'type': 'command', 'command': '...'}]}
+    for sub in hook_entry.get('hooks', []):
+        cmd = sub.get('command', '')
+        if 'cctg/hooks' in cmd:
+            return True
+    # Old format: {'type': 'command', 'command': '...'}
+    cmd = hook_entry.get('command', '')
+    return 'cctg/hooks' in cmd
+
 with open('$SETTINGS_FILE') as f:
     settings = json.load(f)
 hooks = settings.get('hooks', {})
 for key in ('SessionStart', 'Notification', 'Stop'):
     if key in hooks:
-        hooks[key] = [h for h in hooks[key] if 'cctg/hooks' not in h.get('command', '')]
+        hooks[key] = [h for h in hooks[key] if not has_cctg(h)]
         if not hooks[key]:
             del hooks[key]
 if not hooks:

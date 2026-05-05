@@ -88,13 +88,13 @@ HOOKS_JSON=$(cat << 'HOOKSEOF'
 {
   "hooks": {
     "SessionStart": [
-      {"type": "command", "command": "HOOKS_DIR/session.py"}
+      {"matcher": "", "hooks": [{"type": "command", "command": "HOOKS_DIR/session.py"}]}
     ],
     "Notification": [
-      {"type": "command", "command": "HOOKS_DIR/notify.py"}
+      {"matcher": "", "hooks": [{"type": "command", "command": "HOOKS_DIR/notify.py"}]}
     ],
     "Stop": [
-      {"type": "command", "command": "HOOKS_DIR/stop.py"}
+      {"matcher": "", "hooks": [{"type": "command", "command": "HOOKS_DIR/stop.py"}]}
     ]
   }
 }
