@@ -36,3 +36,26 @@ class TTYRouter:
         except (OSError, FileNotFoundError):
             pass
         return None
+
+    def find_tty_for_session(self, session_id: str) -> str | None:
+        """Find TTY for a session by scanning /proc for claude processes."""
+        try:
+            for pid_str in os.listdir("/proc"):
+                if not pid_str.isdigit():
+                    continue
+                try:
+                    cmdline_path = f"/proc/{pid_str}/cmdline"
+                    if os.path.exists(cmdline_path):
+                        with open(cmdline_path, "rb") as f:
+                            cmdline = f.read()
+                        if b"claude" in cmdline:
+                            fd_path = f"/proc/{pid_str}/fd/0"
+                            if os.path.exists(fd_path):
+                                link = os.readlink(fd_path)
+                                if link.startswith("/dev/"):
+                                    return link
+                except (OSError, PermissionError):
+                    continue
+        except (OSError, PermissionError):
+            pass
+        return None

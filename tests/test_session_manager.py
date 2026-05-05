@@ -137,3 +137,13 @@ async def test_get_attached_session_none(sm):
 async def test_try_attach_nonexistent(sm):
     with pytest.raises(ValueError, match="not found"):
         await sm.attach("nonexistent")
+
+
+@pytest.mark.asyncio
+async def test_discover_and_update_session_tty_pid(sm, db):
+    """discover_and_update should not crash even if no TTY found."""
+    await db.add_session("abc123", "proj", "/home/user/proj", "main", None, None)
+    # This is best-effort, just verify it doesn't crash
+    sm.discover_and_update("abc123")
+    s = await db.get_session("abc123")
+    # May or may not find TTY in CI, just verify no crash
