@@ -273,18 +273,39 @@ class TelegramHandler:
 
     async def _on_text(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         text = update.message.text or ""
+        # Route button presses to commands
+        command = None
+        if text.startswith("/"):
+            command = text
+        else:
+            button_map = {
+                "📋 Список сессий": "/list",
+                "▶ Начать отслеживание": "/start_track",
+                "⏸ Остановить": "/stop_track",
+                "ℹ️ Статус": "/status",
+                "❌ Открепить": "/detach",
+                "❓ Помощь": "/help",
+            }
+            command = button_map.get(text)
+
+        if command:
+            resp_text, kb = await self.handle_command(command)
+            if resp_text:
+                await update.message.reply_text(resp_text, reply_markup=kb, parse_mode="HTML")
+            return
+
         await self.handle_message(text)
 
     def _build_kb(self, attached: bool = False, tracking: bool = False) -> ReplyKeyboardMarkup:
         buttons = []
         if tracking:
             buttons.append([KeyboardButton("⏸ Остановить"), KeyboardButton("ℹ️ Статус")])
-            buttons.append([KeyboardButton("\U0001f4cb Список сессий"), KeyboardButton("❌ Открепить")])
+            buttons.append([KeyboardButton("📋 Список сессий"), KeyboardButton("❌ Открепить")])
         elif attached:
             buttons.append([KeyboardButton("▶ Начать отслеживание"), KeyboardButton("ℹ️ Статус")])
-            buttons.append([KeyboardButton("\U0001f4cb Список сессий"), KeyboardButton("❌ Открепить")])
+            buttons.append([KeyboardButton("📋 Список сессий"), KeyboardButton("❌ Открепить")])
         else:
-            buttons.append([KeyboardButton("\U0001f4cb Список сессий"), KeyboardButton("ℹ️ Статус")])
+            buttons.append([KeyboardButton("📋 Список сессий"), KeyboardButton("ℹ️ Статус")])
             buttons.append([KeyboardButton("❓ Помощь")])
         return ReplyKeyboardMarkup(buttons, resize_keyboard=True, is_persistent=True)
 
