@@ -71,12 +71,18 @@ HOOKSEOF
 HOOKS_JSON="${HOOKS_JSON//HOOKS_DIR/$INSTALL_DIR/hooks}"
 
 if [ -f "$SETTINGS_FILE" ]; then
+    # Backup before modifying
+    cp "$SETTINGS_FILE" "${SETTINGS_FILE}.bak"
+    echo "✓ Бекап сохранён в ${SETTINGS_FILE}.bak"
+
     python3 -c "
 import json
 with open('$SETTINGS_FILE') as f:
     settings = json.load(f)
 new_hooks = json.loads('''$HOOKS_JSON''')['hooks']
-settings.setdefault('hooks', {}).update(new_hooks)
+hooks = settings.setdefault('hooks', {})
+for key, value in new_hooks.items():
+    hooks.setdefault(key, []).extend(value)
 with open('$SETTINGS_FILE', 'w') as f:
     json.dump(settings, f, indent=2)
     f.write('\n')
