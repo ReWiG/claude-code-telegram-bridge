@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta:__legacy__"
+
+[project]
+name = "cctg"
+version = "0.1.0"
+description = "Claude Code Telegram Bridge"
+requires-python = ">=3.10"
+dependencies = [
+    "python-telegram-bot>=20.0",
+    "aiosqlite>=0.19",
+    "aiofiles>=23.0",
+    "watchdog>=3.0",
+    "tomli>=2.0; python_version < '3.11'",
+]
+
+[tool.setuptools.packages.find]
+exclude = ["data", "data.*"]
+
+[project.scripts]
+cctg = "cctg.__main__:main"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-asyncio>=0.21",
+]
