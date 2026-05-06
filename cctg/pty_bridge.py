@@ -36,6 +36,13 @@ class PTYBridge:
             os.dup2(slave_fd, 2)
             if slave_fd > 2:
                 os.close(slave_fd)
+            # Turn off echo on slave (fd 0 is now the dup'd slave)
+            try:
+                attrs = termios.tcgetattr(0)
+                attrs[3] = attrs[3] & ~termios.ECHO
+                termios.tcsetattr(0, termios.TCSANOW, attrs)
+            except OSError:
+                pass
             # Set terminal properties
             os.environ["TERM"] = os.environ.get("TERM", "xterm-256color")
             # Copy window size from parent terminal

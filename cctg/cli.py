@@ -149,13 +149,16 @@ def cmd_launch(args):
     bridge = PTYBridge(cwd=cwd)
     bridge.start(cmd)
 
-    print(f"[cctg] Session {session_id[:8]} started (PID {bridge.child_pid}) in {cwd}")
+    print(f"[cctg] Session ID: {session_id}")
+    print(f"[cctg] Short:    {session_id[:8]}")
+    print(f"[cctg] PID:      {bridge.child_pid}")
+    print(f"[cctg] CWD:      {cwd}")
 
     # Save and set terminal to raw mode
     fd = sys.stdin.fileno()
     old_settings = termios.tcgetattr(fd)
     new_settings = termios.tcgetattr(fd)
-    new_settings[3] = new_settings[3] & ~(termios.ECHO | termios.ICANON | termios.ISIG)
+    new_settings[3] = new_settings[3] & ~(termios.ECHO | termios.ICANON)
     new_settings[6][termios.VMIN] = 1
     new_settings[6][termios.VTIME] = 0
     termios.tcsetattr(fd, termios.TCSANOW, new_settings)
