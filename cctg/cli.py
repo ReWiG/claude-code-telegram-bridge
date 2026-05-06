@@ -219,7 +219,8 @@ def cmd_launch(args):
                         if msg and msg.startswith(b"INPUT|"):
                             parts = msg.split(b"|", 2)
                             if len(parts) >= 3:
-                                os.write(bridge.master_fd, parts[2])
+                                # Append Enter after the text
+                                os.write(bridge.master_fd, parts[2] + b"\r")
                     except (BlockingIOError, BrokenPipeError, OSError):
                         pass
 
