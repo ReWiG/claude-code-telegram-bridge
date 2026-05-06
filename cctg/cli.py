@@ -95,13 +95,20 @@ def cmd_daemon(args):
     async def _run():
         daemon = Daemon(cfg)
         loop = asyncio.get_running_loop()
+        stopped = False
 
-        def _shutdown():
-            loop.create_task(daemon.stop())
+        async def _shutdown():
+            nonlocal stopped
+            if not stopped:
+                stopped = True
+                await daemon.stop()
+
+        def _signal_handler():
+            loop.create_task(_shutdown())
 
         for sig in (signal.SIGINT, signal.SIGTERM):
             try:
-                loop.add_signal_handler(sig, _shutdown)
+                loop.add_signal_handler(sig, _signal_handler)
             except NotImplementedError:
                 pass
 
@@ -110,7 +117,9 @@ def cmd_daemon(args):
         except KeyboardInterrupt:
             pass
         finally:
-            await daemon.stop()
+            if not stopped:
+                stopped = True
+                await daemon.stop()
 
     asyncio.run(_run())
 

@@ -59,8 +59,14 @@ class TelegramHandler:
                 await self.app.updater.stop()
             except RuntimeError:
                 pass
-            await self.app.stop()
-            await self.app.shutdown()
+            try:
+                await self.app.stop()
+            except RuntimeError:
+                pass
+            try:
+                await self.app.shutdown()
+            except RuntimeError:
+                pass
 
     async def send_message(self, text: str, reply_markup=None) -> int | None:
         try:

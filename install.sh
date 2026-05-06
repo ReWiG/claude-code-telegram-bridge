@@ -131,6 +131,7 @@ After=network-online.target
 Type=simple
 ExecStart=$VENV_DIR/bin/python -m cctg daemon
 ExecReload=/bin/kill -HUP \$MAINPID
+TimeoutStopSec=10
 Restart=on-failure
 RestartSec=5
 Environment=CCTG_CONFIG=$INSTALL_DIR/config.toml
