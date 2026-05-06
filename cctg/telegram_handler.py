@@ -291,6 +291,11 @@ class TelegramHandler:
                     text=query.message.text + f"\n\n✅ Прикреплён к {cwd}",
                     parse_mode="HTML",
                 )
+                # Send message with updated reply keyboard
+                await query.message.reply_text(
+                    "✅ Готово. Используй кнопки для управления.",
+                    reply_markup=self._build_kb(attached=True, tracking=False),
+                )
             except ValueError as e:
                 await query.edit_message_text(
                     text=query.message.text + f"\n\n❌ {e}",
