@@ -127,6 +127,22 @@ class Daemon:
         finally:
             if session_id:
                 self._bridge_writers.pop(session_id, None)
+                # Mark session as exited if not already
+                s = await self.db.get_session(session_id)
+                if s and s["status"] == "active":
+                    await self.db.set_session_status(session_id, "exited")
+                    logger.info("Session %s disconnected (no UNREGISTER)", session_id[:8])
+                    # Auto-detach
+                    attached_id = await self.db.get_state("attached_session")
+                    if attached_id == session_id:
+                        was_tracking = await self.db.get_state("watch_active") == "1"
+                        await self.session_manager.detach()
+                        cwd = s["cwd"]
+                        await self.telegram.send_message(
+                            f"🔌 <b>Сессия закрыта</b>\n📁 {cwd}\n\n"
+                            f"{'Отслеживание остановлено, ' if was_tracking else ''}Привязка автоматически снята.",
+                            reply_markup=self.telegram._build_kb(attached=False, tracking=False),
+                        )
             writer.close()
 
     async def _handle_session_output(self, session_id: str, text: str) -> None:
@@ -176,11 +192,22 @@ class Daemon:
             try:
                 now = time.time()
                 if now - last_cleanup >= cleanup_interval:
+                    await self._cleanup_stale_sessions()
                     last_cleanup = now
                 await asyncio.sleep(1)
             except Exception as e:
                 logger.error(f"Main loop error: {e}", exc_info=True)
                 await asyncio.sleep(5)
+
+    async def _cleanup_stale_sessions(self) -> None:
+        """Mark sessions as exited if their bridge writer is disconnected."""
+        for sid, writer in list(self._bridge_writers.items()):
+            if writer.is_closing():
+                self._bridge_writers.pop(sid, None)
+                s = await self.db.get_session(sid)
+                if s and s["status"] == "active":
+                    await self.db.set_session_status(sid, "exited")
+                    logger.info("Session %s stale (writer closed)", sid[:8])
 
     async def _ensure_dirs(self) -> None:
         install_dir = os.path.expanduser(self.config.install_dir)
