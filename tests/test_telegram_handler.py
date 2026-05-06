@@ -64,8 +64,8 @@ class TestCommandHandling:
         ]
         mock_db.get_state = AsyncMock(side_effect=lambda k: {"attached_session": None, "watch_active": None}.get(k))
         text, kb = await handler.handle_command("/list")
-        assert "proj" in text
         assert "/p" in text
+        assert "abc" in text
 
     @pytest.mark.asyncio
     async def test_attach_command(self, handler, mock_db, mock_sm):

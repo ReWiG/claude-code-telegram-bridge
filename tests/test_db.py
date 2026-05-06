@@ -161,5 +161,6 @@ async def test_reset_on_startup(tmp_db_path):
     assert len(await db.get_unprocessed_events()) == 0
     assert await db.get_live_message("s1") is None
     s = await db.get_session("s1")
-    assert s["status"] == "exited"
+    # reset_on_startup no longer marks sessions as exited
+    assert s["status"] == "active"
     await db.close()
