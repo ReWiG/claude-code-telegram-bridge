@@ -54,7 +54,7 @@ class TelegramHandler:
 
         await self.app.initialize()
         await self.app.start()
-        await self.app.updater.start_polling(allowed_updates=["message", "callback_query"], timeout=2, poll_interval=0.5)
+        await self.app.updater.start_polling(allowed_updates=["message", "callback_query"], timeout=30, poll_interval=1.0)
         logger.info("Updater running: %s", self.app.updater.running)
 
     async def stop(self) -> None:
