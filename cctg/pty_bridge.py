@@ -36,6 +36,14 @@ class PTYBridge:
             os.dup2(slave_fd, 2)
             if slave_fd > 2:
                 os.close(slave_fd)
+            # Set terminal properties
+            os.environ["TERM"] = os.environ.get("TERM", "xterm-256color")
+            # Copy window size from parent terminal
+            try:
+                size = fcntl.ioctl(0, termios.TIOCGWINSZ, b"\x00" * 8)
+                fcntl.ioctl(slave_fd, termios.TIOCSWINSZ, size)
+            except OSError:
+                pass
             os.chdir(self.cwd)
             os.execvp(cmd[0], cmd)
             os._exit(1)

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import fcntl
 import logging
 import os
 import select
@@ -153,6 +154,19 @@ def cmd_launch(args):
     # Save terminal settings
     fd = sys.stdin.fileno()
     old_settings = termios.tcgetattr(fd)
+
+    # Handle window resize
+    def _handle_winch(signum, frame):
+        if bridge.master_fd:
+            try:
+                size = fcntl.ioctl(fd, termios.TIOCGWINSZ, b"\x00" * 8)
+                fcntl.ioctl(bridge.master_fd, termios.TIOCSWINSZ, size)
+            except OSError:
+                pass
+
+    signal.signal(signal.SIGWINCH, _handle_winch)
+    # Set initial window size
+    _handle_winch(None, None)
 
     # Connect to daemon
     SOCKET_PATH = os.path.expanduser("~/.cctg/data/cctg.sock")
