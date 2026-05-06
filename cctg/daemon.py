@@ -136,6 +136,12 @@ class Daemon:
         attached_id = await self.db.get_state("attached_session")
         if attached_id != session_id:
             return
+        # Strip ANSI escape sequences for Telegram
+        import re
+        text = re.sub(r'\x1b\[[0-9;]*[a-zA-Z]', '', text)
+        text = re.sub(r'\x1b\][0-9;]*[^\x07]*\x07', '', text)
+        if not text.strip():
+            return
         live = await self.db.get_live_message(session_id)
         s = await self.db.get_session(session_id)
         cwd = s["cwd"] if s else "?"
