@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import time
@@ -41,6 +42,7 @@ class Daemon:
             proxy=self.config.telegram_proxy,
         )
         self.telegram.set_input_callback(self.inject_input)
+        self.telegram.set_response_callback(self.inject_response)
         await self.telegram.start()
         self._write_pid()
         self._running = True
@@ -72,12 +74,24 @@ class Daemon:
         logger.info("Daemon stopped")
 
     async def inject_input(self, session_id: str, text: str) -> bool:
-        """Send text to a session's PTY via Unix socket."""
+        """Send text to a session's PTY via Unix socket (with Enter appended)."""
         writer = self._bridge_writers.get(session_id)
         if not writer:
             return False
         try:
             writer.write(f"INPUT|{text}\n".encode())
+            await writer.drain()
+            return True
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            return False
+
+    async def inject_response(self, session_id: str, text: str) -> bool:
+        """Send a single-char response to PTY (no Enter appended)."""
+        writer = self._bridge_writers.get(session_id)
+        if not writer:
+            return False
+        try:
+            writer.write(f"RESP|{text}\n".encode())
             await writer.drain()
             return True
         except (BrokenPipeError, ConnectionResetError, OSError):
@@ -100,6 +114,18 @@ class Daemon:
                     )
                     self._bridge_writers[session_id] = writer
                     logger.info("Session %s registered (%s PID %s)", session_id[:8], cwd, pid_str)
+                elif line.startswith("FLUSH|"):
+                    _, sid = line.split("|", 1)
+                    await self.db.clear_live_message(sid)
+                elif line.startswith("NOTIFY|"):
+                    _, sid, length = line.split("|")
+                    data = await reader.readexactly(int(length))
+                    payload = json.loads(data.decode("utf-8", errors="replace"))
+                    s = await self.db.get_session(sid)
+                    if s:
+                        await self.telegram.send_permission_prompt(
+                            s, payload.get("msg", ""), payload.get("tool_use"),
+                        )
                 elif line.startswith("OUTPUT|") and session_id:
                     _, sid, length = line.split("|")
                     data = await reader.readexactly(int(length))
@@ -113,14 +139,13 @@ class Daemon:
                     # Auto-detach if was attached
                     attached_id = await self.db.get_state("attached_session")
                     if attached_id == sid:
-                        was_tracking = await self.db.get_state("watch_active") == "1"
                         await self.session_manager.detach()
                         s = await self.db.get_session(sid)
                         cwd = s["cwd"] if s else "?"
                         await self.telegram.send_message(
                             f"\U0001f50c <b>Сессия закрыта</b>\n\U0001f4c1 {cwd}\n\n"
-                            f"{'Отслеживание остановлено, ' if was_tracking else ''}Привязка автоматически снята.",
-                            reply_markup=self.telegram._build_kb(attached=False, tracking=False),
+                            "Привязка автоматически снята.",
+                            reply_markup=self.telegram._build_kb(attached=False),
                         )
         except (asyncio.IncompleteReadError, ConnectionResetError, BrokenPipeError):
             pass
@@ -135,27 +160,28 @@ class Daemon:
                     # Auto-detach
                     attached_id = await self.db.get_state("attached_session")
                     if attached_id == session_id:
-                        was_tracking = await self.db.get_state("watch_active") == "1"
                         await self.session_manager.detach()
                         cwd = s["cwd"]
                         await self.telegram.send_message(
                             f"🔌 <b>Сессия закрыта</b>\n📁 {cwd}\n\n"
-                            f"{'Отслеживание остановлено, ' if was_tracking else ''}Привязка автоматически снята.",
-                            reply_markup=self.telegram._build_kb(attached=False, tracking=False),
+                            "Привязка автоматически снята.",
+                            reply_markup=self.telegram._build_kb(attached=False),
                         )
             writer.close()
 
     async def _handle_session_output(self, session_id: str, text: str) -> None:
-        """Forward session output to Telegram if tracking."""
-        if not await self.session_manager.is_tracking():
-            return
+        """Forward session output to Telegram if attached."""
         attached_id = await self.db.get_state("attached_session")
         if attached_id != session_id:
             return
         # Strip ANSI escape sequences for Telegram
         import re
-        text = re.sub(r'\x1b\[[0-9;]*[a-zA-Z]', '', text)
-        text = re.sub(r'\x1b\][0-9;]*[^\x07]*\x07', '', text)
+        # CSI: ESC [ param* interm* final (catches \e[?1049h, \e[2J, etc.)
+        text = re.sub(r'\x1b\[[\x30-\x3f]*[\x20-\x2f]*[\x40-\x7e]', '', text)
+        # OSC: ESC ] ... (BEL|ST) — e.g. \e]0;title\a, \e]8;;link\a
+        text = re.sub(r'\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)', '', text)
+        # Other escape sequences: ESC + char (e.g. ESC c for reset)
+        text = re.sub(r'\x1b[^\[\]][\x20-\x7e]', '', text)
         if not text.strip():
             return
         live = await self.db.get_live_message(session_id)

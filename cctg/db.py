@@ -34,16 +34,6 @@ class Database:
             )
         """)
         await self._conn.execute("""
-            CREATE TABLE IF NOT EXISTS pending_events (
-                id          INTEGER PRIMARY KEY AUTOINCREMENT,
-                session_id  TEXT NOT NULL,
-                type        TEXT NOT NULL,
-                payload     TEXT NOT NULL,
-                created_at  INTEGER NOT NULL,
-                processed   INTEGER DEFAULT 0
-            )
-        """)
-        await self._conn.execute("""
             CREATE TABLE IF NOT EXISTS live_messages (
                 id               INTEGER PRIMARY KEY AUTOINCREMENT,
                 session_id       TEXT NOT NULL,
@@ -111,33 +101,6 @@ class Database:
         )
         await self._conn.commit()
 
-    async def add_pending_event(self, session_id: str, event_type: str, payload: str) -> None:
-        await self._conn.execute(
-            "INSERT INTO pending_events (session_id, type, payload, created_at) VALUES (?, ?, ?, ?)",
-            (session_id, event_type, payload, int(time.time())),
-        )
-        await self._conn.commit()
-
-    async def get_unprocessed_events(self) -> list[dict]:
-        cursor = await self._conn.execute(
-            "SELECT * FROM pending_events WHERE processed = 0 ORDER BY id ASC"
-        )
-        return [dict(row) for row in await cursor.fetchall()]
-
-    async def mark_event_processed(self, event_id: int) -> None:
-        await self._conn.execute(
-            "UPDATE pending_events SET processed = 1 WHERE id = ?", (event_id,)
-        )
-        await self._conn.commit()
-
-    async def cleanup_old_events(self, max_age_seconds: int = 3600) -> None:
-        cutoff = int(time.time()) - max_age_seconds
-        await self._conn.execute(
-            "DELETE FROM pending_events WHERE processed = 1 AND created_at < ?",
-            (cutoff,),
-        )
-        await self._conn.commit()
-
     async def create_live_message(self, session_id: str, telegram_msg_id: int, buffer: str = "") -> int:
         cursor = await self._conn.execute(
             "INSERT INTO live_messages (session_id, telegram_msg_id, buffer, created_at) VALUES (?, ?, ?, ?)",
@@ -174,8 +137,6 @@ class Database:
         await self._conn.commit()
 
     async def reset_on_startup(self) -> None:
-        await self._conn.execute("DELETE FROM pending_events")
         await self._conn.execute("DELETE FROM live_messages")
         await self._conn.execute("DELETE FROM state")
         await self._conn.commit()
-        # Note: sessions are NOT cleared — dead ones will be detected by _detect_exited_sessions

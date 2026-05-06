@@ -10,8 +10,9 @@ import termios
 
 
 class PTYBridge:
-    def __init__(self, cwd: str):
+    def __init__(self, cwd: str, extra_env: dict[str, str] | None = None):
         self.cwd = cwd
+        self.extra_env = extra_env or {}
         self.master_fd: int | None = None
         self.child_pid: int | None = None
         self._running = False
@@ -46,6 +47,8 @@ class PTYBridge:
                 pass
             # Set terminal properties
             os.environ["TERM"] = os.environ.get("TERM", "xterm-256color")
+            for k, v in self.extra_env.items():
+                os.environ[k] = v
             # Copy window size from parent terminal
             try:
                 size = fcntl.ioctl(0, termios.TIOCGWINSZ, b"\x00" * 8)
@@ -63,7 +66,9 @@ class PTYBridge:
             fcntl.fcntl(self.master_fd, fcntl.F_SETFL, fl | os.O_NONBLOCK)
             return pid
 
-    def start(self, cmd: list[str]) -> None:
+    def start(self, cmd: list[str], extra_env: dict[str, str] | None = None) -> None:
+        if extra_env:
+            self.extra_env = extra_env
         self.master_fd, slave_fd = self._create_pty()
         self.child_pid = self._spawn_child(slave_fd, cmd)
         self._running = True

@@ -4,95 +4,65 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Проект
 
-Мониторинг Claude Code с отправкой уведомлений в Telegram. Скрипт `monitor-claude.sh`:
-- Отслеживает лог-файл `/tmp/claude-current.log`
-- Отправляет Telegram-сообщения через SOCKS5-прокси при появлении запросов подтверждения
-- Позволяет отвечать на запросы Claude Code прямо из Telegram
+cctg — мост между Claude Code и Telegram на PTY-прокси. Запускает Claude Code внутри псевдо-терминала, пересылает вывод модели в Telegram, принимает команды и ответы на запросы разрешений из Telegram.
+
+Работает с [Claude Code Switch](https://github.com/kaitranntt/ccs).
 
 ## Архитектура
 
-- **monitor-claude.sh** — основной скрипт мониторинга
-- Использует Python для парсинга JSON ответов Telegram API
-- Состояние хранится в файлах `/tmp/cc-*`
+Три процесса:
+1. **Мост** (`cli.py cmd_launch`) — создаёт PTY, spawn'ит `ccs`, читает JSONL-транскрипты, мультиплексирует ввод/вывод между терминалом, сокетом демона и PTY
+2. **Демон** (`daemon.py`) — asyncio-сервер на Unix-сокете, обрабатывает подключения мостов, работает с Telegram API через `python-telegram-bot`
+3. **Хуки** (`hooks/`) — Claude Code запускает их на события SessionStart и Notification, пишут в файлы для моста
+
+Данные модели читаются из JSONL-транскриптов (`~/.claude/projects/<project>/<session>.jsonl`), а не из вывода PTY. PTY используется только для ввода (отправка текста и ответов на разрешения).
+
+Связь мост↔демон — line-based протокол через Unix-сокет: `REGISTER`, `OUTPUT`, `FLUSH`, `NOTIFY`, `UNREGISTER`, `INPUT`, `RESP`.
+
+## Ключевые файлы
+
+| Файл | Роль |
+|------|------|
+| `cctg/cli.py` | CLI (`start`, `stop`, `status`, `daemon`, `launch`, `install`) |
+| `cctg/daemon.py` | Демон: Unix-сокет сервер, приём/отправка через TelegramHandler |
+| `cctg/pty_bridge.py` | `PTYBridge`: создание PTY, fork+exec ccs, I/O |
+| `cctg/transcript_watcher.py` | `TranscriptWatcher`: чтение JSONL, извлечение текста и tool_use |
+| `cctg/telegram_handler.py` | `TelegramHandler`: команды бота, кнопки разрешений, callback'и |
+| `cctg/session_manager.py` | `SessionManager`: attach/detach, хранение состояния в БД |
+| `cctg/db.py` | SQLite через aiosqlite: сессии, состояние, live-сообщения |
+| `cctg/tty_router.py` | `TTYRouter`: маппинг y/n/a, поиск TTY в /proc |
+| `hooks/session.py` | Хук SessionStart — пишет session_id в events-файл |
+| `hooks/notify.py` | Хук Notification — пишет permission_prompt в events-файл |
+
+## Ключевые детали реализации
+
+**PTY:** родительский терминал должен иметь `ICRNL` выключен — иначе Enter конвертируется в `\n` вместо `\r`, и ccs/Ink не распознаёт нажатие.
+
+**Числовые клавиши для диалогов:** Permission-диалог: 1=Allow, 2=Allow all, 3=Deny. AskUserQuestion: 1/2/3... для вариантов. Стрелки не работают.
+
+**Протокол:** `OUTPUT` и `NOTIFY` используют `len(data)` в **байтах** (не символах) для `readexactly()`. `INPUT` добавляет `\r`, `RESP` — нет.
+
+**callback_data Telegram:** максимум 64 байта, поэтому используется короткий ключ `p|{N}` с хранением полных данных в `_pending_perms`.
+
+## Установка и тестирование
+
+```bash
+install.sh    # установка (venv, зависимости, хуки, systemd)
+uninstall.sh  # удаление
+```
+
+Ручная перезагрузка кода при отладке:
+```bash
+cp cctg/*.py ~/.cctg/cctg/ && systemctl --user restart cctg
+```
+
+Мост (`cctg launch`) нужно перезапускать вручную (Ctrl+C и заново) — systemctl только для демона.
 
 ## Запуск
 
 ```bash
-./monitor-claude.sh
+cctg start       # запуск демона (systemd)
+cctg stop        # остановка
+cctg status      # статус
+cctg launch <ccs-profile>  # запуск сессии Claude Code
 ```
-
-## Systemd-сервис
-
-Для автозапуска мониторинга используется `cc-monitor.service`:
-
-```bash
-systemctl --user enable --now cc-monitor.service   # включить и запустить
-systemctl --user status cc-monitor.service          # статус
-systemctl --user stop cc-monitor.service             # остановить
-systemctl --user restart cc-monitor.service          # перезапустить
-```
-
-**Текущий статус:** `disabled`, `inactive (dead)`
-
-## Файлы состояния
-
-| Файл | Назначение |
-|------|------------|
-| `/tmp/cc-monitor-watch` | Флаг активного мониторинга |
-| `/tmp/cc-monitor-offset` | Offset для Telegram API polling |
-| `/tmp/cc-monitor-logpos` | Позиция в лог-файле |
-| `/tmp/cc-monitor-seen` | Кэш последнего состояния |
-
-## Команды Telegram
-
-- `🎯 Watch` — включить слежение
-- `⏸ Stop` — выключить слежение
-- `📋 Status` — показать статус
-- `❓ Help` — показать help
-
-## Переменные конфигурации
-
-| Переменная | Описание |
-|------------|----------|
-| `TG_TOKEN` | Telegram bot token |
-| `CHAT_ID` | Chat ID получателя |
-| `PROXY` | SOCKS5 прокси |
-| `LOG_FILE` | Лог-файл Claude Code |
-| `INTERVAL` | Интервал проверки (сек) |
-
-## Запуск Claude Code с логированием
-
-| Команда | Описание |
-|---------|----------|
-| `clan` | Claude Code с профилем `lanit` + лог в `/tmp/claude-lanit-HHMM.log` |
-| `cdeep` | Claude Code с профилем `deepseek` + лог в `/tmp/claude-deepseek-HHMM.log` |
-
-Обе команды:
-- Создают timestamped лог-файл
-- Обновляют симлинк `/tmp/claude-current.log` на свежий лог
-- Используют `script` для терминального логирования
-
-**Содержимое `clan`:**
-```bash
-#!/usr/bin/env bash
-ts=$(date '+%H%M')
-logfile="/tmp/claude-lanit-${ts}.log"
-ln -sf "$logfile" /tmp/claude-current.log 2>/dev/null
-echo "→ Лог: $logfile"
-exec script -q "$logfile" -c "ccs lanit"
-```
-
-**Содержимое `cdeep`:**
-```bash
-#!/usr/bin/env bash
-ts=$(date '+%H%M')
-logfile="/tmp/claude-deepseek-${ts}.log"
-ln -sf "$logfile" /tmp/claude-current.log 2>/dev/null
-echo "→ Лог: $logfile"
-exec script -q "$logfile" -c "ccs deepseek"
-```
-
-## Примечания
-
-- Скрипт сам не удаляет логи — управление через `clan`/`cdeep`
-- Для перенаправления ответов в TTY используется `/dev/$tty`

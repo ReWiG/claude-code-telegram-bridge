@@ -1,6 +1,7 @@
 """Telegram bot handler — commands, callbacks, message forwarding."""
 from __future__ import annotations
 
+import json
 import logging
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
@@ -30,9 +31,15 @@ class TelegramHandler:
         self.app: Application | None = None
         self._proxy = proxy
         self._input_callback = None
+        self._response_callback = None
+        self._pending_perms: dict[str, dict] = {}
+        self._perm_counter = 0
 
     def set_input_callback(self, cb):
         self._input_callback = cb
+
+    def set_response_callback(self, cb):
+        self._response_callback = cb
 
     async def start(self) -> None:
         builder = Application.builder().token(self.token)
@@ -43,8 +50,6 @@ class TelegramHandler:
 
         self.app.add_handler(CommandHandler("list", self._cmd_list))
         self.app.add_handler(CommandHandler("attach", self._cmd_attach))
-        self.app.add_handler(CommandHandler("start_track", self._cmd_start_track))
-        self.app.add_handler(CommandHandler("stop_track", self._cmd_stop_track))
         self.app.add_handler(CommandHandler("status", self._cmd_status))
         self.app.add_handler(CommandHandler("detach", self._cmd_detach))
         self.app.add_handler(CommandHandler("help", self._cmd_help))
@@ -92,19 +97,85 @@ class TelegramHandler:
             logger.error(f"edit_message failed: {e}")
             return False
 
-    async def send_permission_prompt(self, session_info: dict, message: str) -> int | None:
+    def _store_perm(self, sid: str, tu_id: str, action: str, idx: int = 0) -> str:
+        self._perm_counter += 1
+        key = str(self._perm_counter)
+        self._pending_perms[key] = {"sid": sid, "tu_id": tu_id, "action": action, "idx": idx}
+        return key
+
+    async def send_permission_prompt(self, session_info: dict, message: str, tool_use: dict | None = None) -> int | None:
         sid = session_info["session_id"]
         short_id = sid[:8]
         cwd = session_info.get("cwd", "")
-        text = f"⚠️ <b>Claude Code (#{short_id} {cwd}) запрашивает разрешение:</b>\n\n<code>{message}</code>"
-        kb = InlineKeyboardMarkup([
-            [
-                InlineKeyboardButton("✅ Allow", callback_data=f"allow|{sid}"),
-                InlineKeyboardButton("❌ Deny", callback_data=f"deny|{sid}"),
-            ],
-            [InlineKeyboardButton("\U0001f513 Allow all", callback_data=f"allow_all|{sid}")],
-        ])
+        text = f"⚠️ <b>Claude Code (#{short_id} {cwd}) запрашивает разрешение:</b>"
+        if message:
+            text += f"\n\n<code>{message}</code>"
+
+        tu = tool_use or {}
+        tu_name = tu.get("name", "")
+        tu_input = tu.get("input", {})
+        tu_id = tu.get("id", "")
+
+        if tu_name == "AskUserQuestion":
+            questions = tu_input.get("questions", [])
+            if questions:
+                q = questions[0]
+                text += f"\n\n<b>{q.get('question', '')}</b>"
+                rows = []
+                for idx, opt in enumerate(q.get("options", [])):
+                    key = self._store_perm(sid, tu_id, "answer", idx)
+                    rows.append([InlineKeyboardButton(
+                        opt.get("label", f"Option {idx+1}"),
+                        callback_data=f"p|{key}",
+                    )])
+                kb = InlineKeyboardMarkup(rows)
+            else:
+                kb = self._default_perm_kb(sid, tu_id)
+        elif tu_name == "Bash":
+            cmd = tu_input.get("command", "")
+            desc = tu_input.get("description", "")
+            if desc:
+                text += f"\n\n<pre>{desc}</pre>"
+            if cmd:
+                text += f"\n\n<pre>$ {cmd}</pre>"
+            kb = self._default_perm_kb(sid, tu_id)
+        elif tu_name in ("Edit", "Write", "Read"):
+            file_path = tu_input.get("file_path", "")
+            if file_path:
+                text += f"\n\n📄 <code>{file_path}</code>"
+            if tu_name == "Edit":
+                old = tu_input.get("old_string", "")
+                new = tu_input.get("new_string", "")
+                diff = ""
+                for line in old.split("\n"):
+                    diff += f"🟥 {line}\n" if line else "\n"
+                for line in new.split("\n"):
+                    diff += f"🟩 {line}\n" if line else "\n"
+                text += f"\n\n<pre>{diff.strip()}</pre>"
+            elif tu_name == "Write":
+                content = tu_input.get("content", "")
+                text += f"\n\n<pre>{content[:1500]}</pre>"
+            kb = self._default_perm_kb(sid, tu_id)
+        elif tu_name in ("WebSearch", "WebFetch"):
+            query = tu_input.get("query", "") or tu_input.get("url", "")
+            if query:
+                text += f"\n\n🔗 <code>{query}</code>"
+            kb = self._default_perm_kb(sid, tu_id)
+        else:
+            if tu_input:
+                text += f"\n\n<pre>{json.dumps(tu_input, indent=2, ensure_ascii=False)[:1000]}</pre>"
+            kb = self._default_perm_kb(sid, tu_id)
+
         return await self.send_message(text, kb)
+
+    def _default_perm_kb(self, sid: str, tu_id: str = "") -> InlineKeyboardMarkup:
+        return InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("✅ Allow", callback_data=f"p|{self._store_perm(sid, tu_id, 'y')}"),
+                InlineKeyboardButton("❌ Deny", callback_data=f"p|{self._store_perm(sid, tu_id, 'n')}"),
+            ],
+            [InlineKeyboardButton("\U0001f513 Allow all", callback_data=f"p|{self._store_perm(sid, tu_id, 'a')}")],
+        ])
 
     async def handle_command(self, command_text: str) -> tuple[str, dict | None]:
         parts = command_text.split()
@@ -114,10 +185,6 @@ class TelegramHandler:
             return await self._handle_list()
         elif cmd == "attach":
             return await self._handle_attach(args)
-        elif cmd == "start_track":
-            return await self._handle_start_track()
-        elif cmd == "stop_track":
-            return await self._handle_stop_track()
         elif cmd == "status":
             return await self._handle_status()
         elif cmd == "detach":
@@ -128,14 +195,11 @@ class TelegramHandler:
             return "Неизвестная команда. /help", None
 
     async def handle_message(self, text: str) -> tuple[str, dict | None]:
-        watch = await self.db.get_state("watch_active")
         attached_id = await self.db.get_state("attached_session")
-        if not watch or not attached_id:
-            logger.debug("handle_message: watch=%s attached=%s — skipping", watch, attached_id)
+        if not attached_id:
             return None, None
         if self._input_callback:
             await self._input_callback(attached_id, text)
-            return "✅", None
         return None, None
 
     async def handle_callback(self, callback_data: str) -> None:
@@ -147,11 +211,13 @@ class TelegramHandler:
         tty_path = session.get("tty") if session else None
         if tty_path:
             self.tty.write_response(action, tty_path)
+        elif self._input_callback:
+            mapped = self.tty.RESPONSE_MAP.get(action, action)
+            await self._input_callback(session_id, mapped)
 
     async def _handle_list(self) -> tuple[str, dict]:
         sessions = await self.db.list_active_sessions()
         attached_id = await self.db.get_state("attached_session")
-        watch = await self.db.get_state("watch_active") == "1"
 
         if not sessions:
             return "\U0001f7e2 Нет активных сессий Claude Code.", self._build_kb()
@@ -173,10 +239,8 @@ class TelegramHandler:
                 attached_str = attached_id[:8]
         else:
             attached_str = "нет"
-        watch_str = "вкл" if watch else "выкл"
-        lines.append(f"\U0001f4ce Прикреплён: {attached_str}  \U0001f441 Отслеживание: {watch_str}")
+        lines.append(f"\U0001f4ce Прикреплён: {attached_str}")
 
-        # Inline keyboard for quick attach
         kb = InlineKeyboardMarkup([
             [InlineKeyboardButton(f"🔗 #{i}", callback_data=f"attach|{s['session_id']}")]
             for i, s in enumerate(sessions, 1)
@@ -198,28 +262,11 @@ class TelegramHandler:
         cwd = sessions[num]["cwd"]
         return (
             f"✅ Прикреплён к #{num + 1} ({cwd})\n\n"
-            f"Используй /start_track чтобы начать отслеживание или пиши текст для отправки в терминал."
-        ), self._build_kb(attached=True, tracking=False)
-
-    async def _handle_start_track(self) -> tuple[str, dict]:
-        try:
-            await self.sm.start_tracking()
-            s = await self.sm.get_attached_session()
-            cwd = s["cwd"] if s else "?"
-            return f"▶ Отслеживание включено для {cwd}\n\nВесь вывод Claude Code будет пересылаться сюда.", self._build_kb(attached=True, tracking=True)
-        except ValueError as e:
-            return f"❌ {e}", self._build_kb()
-
-    async def _handle_stop_track(self) -> tuple[str, dict]:
-        try:
-            await self.sm.stop_tracking()
-            return "⏸ Отслеживание остановлено.", self._build_kb(attached=True, tracking=False)
-        except ValueError as e:
-            return f"❌ {e}", self._build_kb()
+            "Пиши текст для отправки в терминал Claude Code."
+        ), self._build_kb(attached=True)
 
     async def _handle_status(self) -> tuple[str, dict]:
         attached_id = await self.db.get_state("attached_session")
-        watch = await self.db.get_state("watch_active") == "1"
         sessions = await self.db.list_active_sessions()
         lines = [f"\U0001f7e2 Активных сессий: {len(sessions)}"]
         if attached_id:
@@ -228,8 +275,7 @@ class TelegramHandler:
                 lines.append(f"\U0001f4c1 Прикреплён: {s['cwd']}")
         else:
             lines.append("\U0001f4c1 Не прикреплён")
-        lines.append(f"\U0001f441 Отслеживание: {'вкл' if watch else 'выкл'}")
-        return "\n".join(lines), self._build_kb(attached=bool(attached_id), tracking=watch)
+        return "\n".join(lines), self._build_kb(attached=bool(attached_id))
 
     async def _handle_detach(self) -> tuple[str, dict]:
         await self.sm.detach()
@@ -240,12 +286,11 @@ class TelegramHandler:
             "\U0001f916 <b>cctg — Claude Code Telegram Bridge</b>\n\n"
             "/list — список активных сессий\n"
             "/attach &lt;номер&gt; — прикрепиться к сессии\n"
-            "/start_track — начать отслеживание (слежение за выводом)\n"
-            "/stop_track — остановить отслеживание\n"
             "/status — статус демона и привязки\n"
             "/detach — открепиться от сессии\n"
             "/help — это меню\n\n"
-            "<i>При прикреплении к сессии в /list появятся инлайн-кнопки для быстрого выбора.</i>"
+            "<i>При прикреплении к сессии в /list появятся инлайн-кнопки для быстрого выбора.</i>\n"
+            "<i>После прикрепления просто пиши текст — он отправится в терминал Claude Code.</i>"
         )
         return text, self._build_kb()
 
@@ -256,14 +301,6 @@ class TelegramHandler:
     async def _cmd_attach(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         args = context.args or []
         text, kb = await self._handle_attach(args)
-        await update.message.reply_text(text, reply_markup=kb, parse_mode="HTML")
-
-    async def _cmd_start_track(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        text, kb = await self._handle_start_track()
-        await update.message.reply_text(text, reply_markup=kb, parse_mode="HTML")
-
-    async def _cmd_stop_track(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        text, kb = await self._handle_stop_track()
         await update.message.reply_text(text, reply_markup=kb, parse_mode="HTML")
 
     async def _cmd_status(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -284,7 +321,6 @@ class TelegramHandler:
         data = query.data or ""
 
         if data.startswith("attach|"):
-            # Handle attach via inline button
             sid = data.split("|", 1)[1]
             try:
                 await self.sm.attach(sid)
@@ -294,10 +330,9 @@ class TelegramHandler:
                     text=query.message.text + f"\n\n✅ Прикреплён к {cwd}",
                     parse_mode="HTML",
                 )
-                # Send message with updated reply keyboard
                 await query.message.reply_text(
-                    "✅ Готово. Используй кнопки для управления.",
-                    reply_markup=self._build_kb(attached=True, tracking=False),
+                    "✅ Готово. Пиши текст для отправки в терминал.",
+                    reply_markup=self._build_kb(attached=True),
                 )
             except ValueError as e:
                 await query.edit_message_text(
@@ -306,23 +341,39 @@ class TelegramHandler:
                 )
             return
 
-        # Handle allow/deny/allow_all
-        await self.handle_callback(data)
-        await query.edit_message_text(
-            text=query.message.text + "\n\n✅ Ответ отправлен.", parse_mode="HTML",
-        )
+        if data.startswith("p|"):
+            key = data.split("|", 1)[1]
+            info = self._pending_perms.pop(key, None)
+            if info and self._response_callback:
+                sid = info["sid"]
+                action = info["action"]
+                if action == "answer":
+                    idx = info.get("idx", 0)
+                    response = str(idx + 1) + "\r"
+                else:
+                    NUM_MAP = {"y": "1", "a": "2", "n": "3"}
+                    response = NUM_MAP.get(action, "2") + "\r"
+                await self._response_callback(sid, response)
+                await query.edit_message_text(
+                    text=query.message.text + f"\n\n✅ Ответ отправлен.", parse_mode="HTML",
+                )
+            return
+
+        if data.startswith("allow|") or data.startswith("deny|") or data.startswith("allow_all|"):
+            await self.handle_callback(data)
+            await query.edit_message_text(
+                text=query.message.text + "\n\n✅ Ответ отправлен.", parse_mode="HTML",
+            )
+            return
 
     async def _on_text(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         text = update.message.text or ""
-        # Route button presses to commands
         command = None
         if text.startswith("/"):
             command = text
         else:
             button_map = {
                 "📋 Список сессий": "/list",
-                "▶ Начать отслеживание": "/start_track",
-                "⏸ Остановить": "/stop_track",
                 "ℹ️ Статус": "/status",
                 "❌ Открепить": "/detach",
                 "❓ Помощь": "/help",
@@ -339,19 +390,19 @@ class TelegramHandler:
         if resp:
             await update.message.reply_text(resp, reply_markup=kb, parse_mode="HTML")
 
-    def _build_kb(self, attached: bool = False, tracking: bool = False) -> ReplyKeyboardMarkup:
-        buttons = []
-        if tracking:
-            buttons.append([KeyboardButton("⏸ Остановить"), KeyboardButton("ℹ️ Статус")])
-            buttons.append([KeyboardButton("📋 Список сессий"), KeyboardButton("❌ Открепить")])
-        elif attached:
-            buttons.append([KeyboardButton("▶ Начать отслеживание"), KeyboardButton("ℹ️ Статус")])
-            buttons.append([KeyboardButton("📋 Список сессий"), KeyboardButton("❌ Открепить")])
+    def _build_kb(self, attached: bool = False) -> ReplyKeyboardMarkup:
+        if attached:
+            buttons = [
+                [KeyboardButton("ℹ️ Статус"), KeyboardButton("📋 Список сессий")],
+                [KeyboardButton("❌ Открепить")],
+            ]
         else:
-            buttons.append([KeyboardButton("📋 Список сессий"), KeyboardButton("ℹ️ Статус")])
-            buttons.append([KeyboardButton("❓ Помощь")])
+            buttons = [
+                [KeyboardButton("📋 Список сессий"), KeyboardButton("ℹ️ Статус")],
+                [KeyboardButton("❓ Помощь")],
+            ]
         return ReplyKeyboardMarkup(buttons, resize_keyboard=True, is_persistent=True)
 
-    def build_keyboard(self, attached: bool = False, tracking: bool = False):
-        kb = self._build_kb(attached, tracking)
+    def build_keyboard(self, attached: bool = False):
+        kb = self._build_kb(attached)
         return kb.keyboard

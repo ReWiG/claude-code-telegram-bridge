@@ -6,7 +6,7 @@ REPO_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 echo "╔════════════════════════════════════════╗"
 echo "║     cctg — Claude Code Telegram Bridge ║"
-echo "║              Установка                  ║"
+echo "║              Установка                 ║"
 echo "╚════════════════════════════════════════╝"
 echo ""
 
@@ -28,8 +28,59 @@ echo "→ Копирование файлов в $INSTALL_DIR ..."
 mkdir -p "$INSTALL_DIR"/{data,hooks,bin,cctg}
 cp -r "$REPO_DIR"/cctg/*.py "$INSTALL_DIR/cctg/" 2>/dev/null || true
 cp -r "$REPO_DIR"/hooks/*.py "$INSTALL_DIR/hooks/" 2>/dev/null || true
+chmod +x "$INSTALL_DIR/hooks/"*.py 2>/dev/null || true
 cp "$REPO_DIR"/pyproject.toml "$INSTALL_DIR/pyproject.toml" 2>/dev/null || true
 echo "✓ Файлы скопированы в $INSTALL_DIR"
+
+# Register hooks in ~/.claude/settings.json
+SETTINGS_FILE="$HOME/.claude/settings.json"
+SESSION_CMD="python3 $INSTALL_DIR/hooks/session.py"
+NOTIFY_CMD="python3 $INSTALL_DIR/hooks/notify.py"
+
+if [ -f "$SETTINGS_FILE" ]; then
+    cp "$SETTINGS_FILE" "${SETTINGS_FILE}.bak"
+    echo "✓ Бекап сохранён в ${SETTINGS_FILE}.bak"
+    python3 -c "
+import json
+
+cmds = {'SessionStart': '$SESSION_CMD', 'Notification': '$NOTIFY_CMD'}
+f = '$SETTINGS_FILE'
+with open(f) as fh:
+    s = json.load(fh)
+
+hooks = s.setdefault('hooks', {})
+
+for hook_type, hook_cmd in cmds.items():
+    entries = hooks.setdefault(hook_type, [])
+    # Merge all entries with empty matcher into one
+    merged_hooks = []
+    remaining = []
+    for e in entries:
+        if e.get('matcher') == '':
+            merged_hooks.extend(e.get('hooks', []))
+        else:
+            remaining.append(e)
+    # Deduplicate
+    seen = set()
+    unique = []
+    for h in merged_hooks:
+        cmd = h.get('command', '')
+        if cmd not in seen:
+            seen.add(cmd)
+            unique.append(h)
+    if hook_cmd not in seen:
+        unique.append({'type': 'command', 'command': hook_cmd})
+    entries.clear()
+    entries.append({'matcher': '', 'hooks': unique})
+    entries.extend(remaining)
+
+with open(f, 'w') as fh:
+    json.dump(s, fh, indent=2, ensure_ascii=False)
+"
+    echo "✓ Хук SessionStart зарегистрирован в settings.json"
+else
+    echo "⚠ $SETTINGS_FILE не найден — хук не зарегистрирован"
+fi
 
 # 2. Create venv
 echo "→ Создание виртуального окружения..."
@@ -63,7 +114,7 @@ cat > "$INSTALL_DIR/bin/cctg" << 'WRAPEOF'
 #!/usr/bin/env bash
 exec "$HOME/.cctg/.venv/bin/python" -m cctg "$@"
 WRAPEOF
-chmod +x "$INSTALL_DIR/bin/cctg" "$INSTALL_DIR/hooks/"*.py
+chmod +x "$INSTALL_DIR/bin/cctg"
 echo "✓ bin/cctg создан"
 
 # 5. Write config
@@ -116,6 +167,6 @@ fi
 
 echo ""
 echo "╔════════════════════════════════════════╗"
-echo "║          Установка завершена!           ║"
-echo "║   Открой Telegram и отправь /help боту  ║"
+echo "║          Установка завершена!          ║"
+echo "║   Открой Telegram и отправь /help боту ║"
 echo "╚════════════════════════════════════════╝"
