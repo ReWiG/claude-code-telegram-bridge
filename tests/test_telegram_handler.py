@@ -115,15 +115,20 @@ class TestCommandHandling:
         mock_db.get_state = AsyncMock(side_effect=lambda k: {
             "attached_session": "abc123", "watch_active": "1"
         }.get(k))
-        mock_db.get_session.return_value = {"session_id": "abc123", "tty": "/dev/pts/2"}
+        callback = AsyncMock(return_value=True)
+        handler._input_callback = callback
         text, kb = await handler.handle_message("fix the bug")
-        mock_tty.write_text.assert_called_once_with("fix the bug", "/dev/pts/2")
+        assert text == "✅"
+        callback.assert_awaited_once_with("abc123", "fix the bug")
 
     @pytest.mark.asyncio
     async def test_text_without_watch_not_forwarded(self, handler, mock_db, mock_tty):
         mock_db.get_state = AsyncMock(return_value=None)
+        callback = AsyncMock()
+        handler._input_callback = callback
         text, kb = await handler.handle_message("fix the bug")
-        mock_tty.write_text.assert_not_called()
+        assert text is None
+        callback.assert_not_called()
 
 
 class TestCallbackHandling:

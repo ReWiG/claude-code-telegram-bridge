@@ -29,6 +29,10 @@ class TelegramHandler:
         self.tty = tty_router
         self.app: Application | None = None
         self._proxy = proxy
+        self._input_callback = None
+
+    def set_input_callback(self, cb):
+        self._input_callback = cb
 
     async def start(self) -> None:
         builder = Application.builder().token(self.token)
@@ -128,18 +132,11 @@ class TelegramHandler:
         attached_id = await self.db.get_state("attached_session")
         if not watch or not attached_id:
             logger.debug("handle_message: watch=%s attached=%s — skipping", watch, attached_id)
-            return "", None
-        session = await self.db.get_session(attached_id)
-        if not session or not session.get("tty"):
-            logger.debug("handle_message: no session or TTY — skipping")
-            return "", None
-        tty = session["tty"]
-        ok = self.tty.write_text(text, tty)
-        if ok:
-            logger.info("→ %s: %s", tty, text[:100])
-        else:
-            logger.error("FAILED to write to %s", tty)
-        return "✅", None
+            return None, None
+        if self._input_callback:
+            await self._input_callback(attached_id, text)
+            return "✅", None
+        return None, None
 
     async def handle_callback(self, callback_data: str) -> None:
         parts = callback_data.split("|", 1)

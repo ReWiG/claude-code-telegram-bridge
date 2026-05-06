@@ -1,19 +1,16 @@
-"""Main daemon — async event loop tying all components together."""
+"""Main daemon — PTY session manager and Telegram bridge."""
 from __future__ import annotations
 
 import asyncio
 import logging
 import os
-import signal
 import time
 
 from cctg.config import Config
 from cctg.db import Database
 from cctg.session_manager import SessionManager
-from cctg.transcript_watcher import TranscriptWatcher
 from cctg.tty_router import TTYRouter
 from cctg.telegram_handler import TelegramHandler
-from cctg.cleanup import CleanupWorker
 
 logger = logging.getLogger(__name__)
 
@@ -23,24 +20,18 @@ class Daemon:
         self.config = config
         self.db: Database | None = None
         self.session_manager: SessionManager | None = None
-        self.transcript_watcher: TranscriptWatcher | None = None
         self.tty_router: TTYRouter | None = None
         self.telegram: TelegramHandler | None = None
-        self.cleanup_worker: CleanupWorker | None = None
         self._running = False
+        self._bridge_writers: dict[str, asyncio.StreamWriter] = {}
 
     async def start(self) -> None:
         await self._ensure_dirs()
-
         self.db = Database(self.config.db_path)
         await self.db.init()
         await self.db.reset_on_startup()
-
         self.session_manager = SessionManager(self.db)
-        self.transcript_watcher = TranscriptWatcher(self.config.transcript_base)
         self.tty_router = TTYRouter()
-        self.cleanup_worker = CleanupWorker(self.db, self.config.events_file)
-
         self.telegram = TelegramHandler(
             token=self.config.telegram_token,
             chat_id=self.config.telegram_chat_id,
@@ -49,177 +40,141 @@ class Daemon:
             tty_router=self.tty_router,
             proxy=self.config.telegram_proxy,
         )
+        self.telegram.set_input_callback(self.inject_input)
         await self.telegram.start()
-        logger.info("Telegram handler started, updater should be polling now")
-
         self._write_pid()
         self._running = True
-        logger.info("Daemon started, entering main loop")
-
+        logger.info("Daemon started")
+        # Start Unix socket server for bridge connections
+        self._socket_path = os.path.join(
+            os.path.expanduser(self.config.install_dir), "data", "cctg.sock"
+        )
+        if os.path.exists(self._socket_path):
+            os.unlink(self._socket_path)
+        self._socket_server = await asyncio.start_unix_server(
+            self._handle_bridge_connection, self._socket_path
+        )
+        logger.info("Bridge socket listening on %s", self._socket_path)
         await self._main_loop()
 
     async def stop(self) -> None:
         self._running = False
+        if hasattr(self, '_socket_server') and self._socket_server:
+            self._socket_server.close()
+        if hasattr(self, '_socket_path') and os.path.exists(self._socket_path):
+            os.unlink(self._socket_path)
+        for writer in self._bridge_writers.values():
+            writer.close()
         if self.telegram:
             await self.telegram.stop()
         if self.db:
             await self.db.close()
         logger.info("Daemon stopped")
 
-    async def _main_loop(self) -> None:
-        cleanup_interval = self.config.session_cleanup_seconds
-        last_discovery = 0
-        last_cleanup = 0
+    async def inject_input(self, session_id: str, text: str) -> bool:
+        """Send text to a session's PTY via Unix socket."""
+        writer = self._bridge_writers.get(session_id)
+        if not writer:
+            return False
+        try:
+            writer.write(f"INPUT|{text}\n".encode())
+            await writer.drain()
+            return True
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            return False
 
-        while self._running:
-            try:
-                await self.cleanup_worker.run_once()
-                await self._process_pending_events()
-                await self._poll_transcripts()
-
-                now = time.time()
-                if now - last_discovery >= 5:
-                    await self._discover_session_ttys()
-                    last_discovery = now
-                if now - last_cleanup >= cleanup_interval:
-                    await self.cleanup_worker._detect_exited_sessions()
-                    last_cleanup = now
-                    # Auto-detach if attached session exited
+    async def _handle_bridge_connection(self, reader, writer):
+        session_id = None
+        try:
+            while self._running:
+                line = await reader.readline()
+                if not line:
+                    break
+                line = line.decode().strip()
+                if line.startswith("REGISTER|"):
+                    _, session_id, cwd, pid_str = line.split("|")
+                    await self.db.add_session(
+                        session_id=session_id,
+                        project_name=os.path.basename(cwd),
+                        cwd=cwd, branch=None, tty=None, pid=int(pid_str),
+                    )
+                    self._bridge_writers[session_id] = writer
+                    logger.info("Session %s registered (%s PID %s)", session_id[:8], cwd, pid_str)
+                elif line.startswith("OUTPUT|") and session_id:
+                    _, sid, length = line.split("|")
+                    data = await reader.readexactly(int(length))
+                    text = data.decode("utf-8", errors="replace")
+                    await self._handle_session_output(sid, text)
+                elif line.startswith("UNREGISTER|"):
+                    _, sid = line.split("|", 1)
+                    self._bridge_writers.pop(sid, None)
+                    await self.db.set_session_status(sid, "exited")
+                    logger.info("Session %s unregistered", sid[:8])
+                    # Auto-detach if was attached
                     attached_id = await self.db.get_state("attached_session")
-                    if attached_id:
-                        s = await self.db.get_session(attached_id)
-                        if s and s["status"] == "exited":
-                            cwd = s.get("cwd", "?")
-                            was_tracking = await self.db.get_state("watch_active") == "1"
-                            await self.session_manager.detach()
-                            logger.info("Auto-detaching from exited session %s (was_tracking=%s)", attached_id[:8], was_tracking)
-                            await self.telegram.send_message(
-                                f"🔌 <b>Сессия закрыта</b>\n📁 {cwd}\n\n"
-                                f"{'Отслеживание остановлено, ' if was_tracking else ''}Привязка автоматически снята.",
-                                reply_markup=self.telegram._build_kb(attached=False, tracking=False),
-                            )
+                    if attached_id == sid:
+                        was_tracking = await self.db.get_state("watch_active") == "1"
+                        await self.session_manager.detach()
+                        s = await self.db.get_session(sid)
+                        cwd = s["cwd"] if s else "?"
+                        await self.telegram.send_message(
+                            f"\U0001f50c <b>Сессия закрыта</b>\n\U0001f4c1 {cwd}\n\n"
+                            f"{'Отслеживание остановлено, ' if was_tracking else ''}Привязка автоматически снята.",
+                            reply_markup=self.telegram._build_kb(attached=False, tracking=False),
+                        )
+        except (asyncio.IncompleteReadError, ConnectionResetError, BrokenPipeError):
+            pass
+        finally:
+            if session_id:
+                self._bridge_writers.pop(session_id, None)
+            writer.close()
 
-                await asyncio.sleep(1)
-            except Exception as e:
-                logger.error(f"Main loop error: {e}", exc_info=True)
-                await asyncio.sleep(5)
-
-    async def _discover_session_ttys(self) -> None:
-        """Find TTY and PID for sessions that don't have them yet by matching CWD."""
-        import os
-        sessions = await self.db.list_active_sessions()
-        for s in sessions:
-            if s.get("tty") and s.get("pid"):
-                continue
-            session_cwd = s.get("cwd", "")
-            # Scan /proc for claude processes, match by CWD
-            try:
-                for pid_str in os.listdir("/proc"):
-                    if not pid_str.isdigit():
-                        continue
-                    try:
-                        pid = int(pid_str)
-                        cmdline_path = f"/proc/{pid_str}/cmdline"
-                        if not os.path.exists(cmdline_path):
-                            continue
-                        with open(cmdline_path, "rb") as f:
-                            cmdline = f.read()
-                        if b"claude" not in cmdline:
-                            continue
-                        # Match by working directory
-                        try:
-                            cwd_link = os.readlink(f"/proc/{pid_str}/cwd")
-                        except OSError:
-                            continue
-                        if cwd_link != session_cwd:
-                            continue
-                        fd_path = f"/proc/{pid_str}/fd/0"
-                        if os.path.exists(fd_path):
-                            link = os.readlink(fd_path)
-                            if link.startswith("/dev/"):
-                                await self.db._conn.execute(
-                                    "UPDATE sessions SET pid=?, tty=? WHERE session_id=? AND pid IS NULL",
-                                    (pid, link, s["session_id"]),
-                                )
-                                await self.db._conn.commit()
-                                logger.info("Discovered TTY for session %s: %s (PID %d, cwd %s)",
-                                            s["session_id"][:8], link, pid, cwd_link)
-                                break
-                    except (OSError, PermissionError, ValueError):
-                        continue
-            except (OSError, PermissionError):
-                pass
-
-    async def _process_pending_events(self) -> None:
-        attached_id = await self.db.get_state("attached_session")
-        tracking = await self.db.get_state("watch_active") == "1"
-
-        events = await self.db.get_unprocessed_events()
-        for event in events:
-            if event["type"] == "notification":
-                # Only forward if tracking AND notification is from attached session
-                if not tracking or event["session_id"] != attached_id:
-                    await self.db.mark_event_processed(event["id"])
-                    continue
-                # Filter out false positives
-                payload = event.get("payload", "")
-                if "waiting for your input" in payload.lower():
-                    await self.db.mark_event_processed(event["id"])
-                    continue
-                session = await self.db.get_session(event["session_id"])
-                if session:
-                    await self.telegram.send_permission_prompt(session, payload)
-            await self.db.mark_event_processed(event["id"])
-
-    async def _poll_transcripts(self) -> None:
+    async def _handle_session_output(self, session_id: str, text: str) -> None:
+        """Forward session output to Telegram if tracking."""
         if not await self.session_manager.is_tracking():
             return
-
-        attached = await self.session_manager.get_attached_session()
-        if not attached:
+        attached_id = await self.db.get_state("attached_session")
+        if attached_id != session_id:
             return
-
-        sid = attached["session_id"]
-        project_name = attached.get("project_name", "")
-        transcript_path = os.path.join(
-            os.path.expanduser(self.config.transcript_base),
-            project_name,
-            f"{sid}.jsonl",
-        )
-
-        if not os.path.exists(transcript_path):
-            return
-
-        new_texts = self.transcript_watcher.read_new_lines(transcript_path)
-        if not new_texts:
-            return
-
-        combined = "\n".join(new_texts)
-        live = await self.db.get_live_message(sid)
-
+        live = await self.db.get_live_message(session_id)
+        s = await self.db.get_session(session_id)
+        cwd = s["cwd"] if s else "?"
         if live:
-            new_buffer = live["buffer"] + "\n" + combined
+            new_buffer = live["buffer"] + text
             if len(new_buffer) > 4000:
                 new_buffer = new_buffer[-4000:]
             ok = await self.telegram.edit_message(
                 live["telegram_msg_id"],
-                f"\U0001f4ac <b>Claude Code (#{sid[:8]} {attached['cwd']})</b>\n\n{new_buffer}"
+                f"\U0001f4ac <b>Claude Code (#{session_id[:8]} {cwd})</b>\n\n{new_buffer}"
             )
             if ok:
                 await self.db.update_live_message_buffer(live["id"], new_buffer)
             else:
-                await self.db.clear_live_message(sid)
+                await self.db.clear_live_message(session_id)
                 msg_id = await self.telegram.send_message(
-                    f"\U0001f4ac <b>Claude Code (#{sid[:8]} {attached['cwd']})</b>\n\n{combined}"
+                    f"\U0001f4ac <b>Claude Code (#{session_id[:8]} {cwd})</b>\n\n{text}"
                 )
                 if msg_id:
-                    await self.db.create_live_message(sid, msg_id, combined)
+                    await self.db.create_live_message(session_id, msg_id, text)
         else:
             msg_id = await self.telegram.send_message(
-                f"\U0001f4ac <b>Claude Code (#{sid[:8]} {attached['cwd']})</b>\n\n{combined}"
+                f"\U0001f4ac <b>Claude Code (#{session_id[:8]} {cwd})</b>\n\n{text}"
             )
             if msg_id:
-                await self.db.create_live_message(sid, msg_id, combined)
+                await self.db.create_live_message(session_id, msg_id, text)
+
+    async def _main_loop(self) -> None:
+        cleanup_interval = self.config.session_cleanup_seconds
+        last_cleanup = 0
+        while self._running:
+            try:
+                now = time.time()
+                if now - last_cleanup >= cleanup_interval:
+                    last_cleanup = now
+                await asyncio.sleep(1)
+            except Exception as e:
+                logger.error(f"Main loop error: {e}", exc_info=True)
+                await asyncio.sleep(5)
 
     async def _ensure_dirs(self) -> None:
         install_dir = os.path.expanduser(self.config.install_dir)
