@@ -95,8 +95,9 @@ class Daemon:
                             logger.info("Auto-detaching from exited session %s (was_tracking=%s)", attached_id[:8], was_tracking)
                             await self.telegram.send_message(
                                 f"🔌 <b>Сессия закрыта</b>\n📁 {cwd}\n\n"
-                                f"{'Отслеживание остановлено, ' if was_tracking else ''}Привязка автоматически снята."
-                                )
+                                f"{'Отслеживание остановлено, ' if was_tracking else ''}Привязка автоматически снята.",
+                                reply_markup=self.telegram._build_kb(attached=False, tracking=False),
+                            )
 
                 await asyncio.sleep(1)
             except Exception as e:
