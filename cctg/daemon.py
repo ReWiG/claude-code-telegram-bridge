@@ -92,9 +92,10 @@ class Daemon:
                             cwd = s.get("cwd", "?")
                             was_tracking = await self.db.get_state("watch_active") == "1"
                             await self.session_manager.detach()
-                            if was_tracking:
-                                await self.telegram.send_message(
-                                    f"🔌 <b>Сессия закрыта</b>\n📁 {cwd}\n\nОтслеживание и привязка автоматически сняты."
+                            logger.info("Auto-detaching from exited session %s (was_tracking=%s)", attached_id[:8], was_tracking)
+                            await self.telegram.send_message(
+                                f"🔌 <b>Сессия закрыта</b>\n📁 {cwd}\n\n"
+                                f"{'Отслеживание остановлено, ' if was_tracking else ''}Привязка автоматически снята."
                                 )
 
                 await asyncio.sleep(1)
