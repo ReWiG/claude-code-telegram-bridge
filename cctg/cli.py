@@ -5,9 +5,14 @@ import argparse
 import asyncio
 import logging
 import os
+import select
 import signal
+import socket
 import subprocess
 import sys
+import termios
+import tty
+import uuid
 
 from cctg.config import load_config
 from cctg.daemon import Daemon
@@ -124,6 +129,90 @@ def cmd_daemon(args):
     asyncio.run(_run())
 
 
+def cmd_launch(args):
+    """Launch a Claude Code session via PTY bridge."""
+    cfg = get_config(args.config)
+    profile = args.profile
+    session_id = str(uuid.uuid4())
+
+    # Find ccs
+    ccs_path = os.path.expanduser("~/.nvm/versions/node/v24.11.1/bin/ccs")
+    if not os.path.exists(ccs_path):
+        ccs_path = "ccs"
+
+    cmd = [ccs_path, profile]
+    cwd = os.getcwd()
+
+    from cctg.pty_bridge import PTYBridge
+
+    bridge = PTYBridge(cwd=cwd)
+    bridge.start(cmd)
+
+    print(f"[cctg] Session {session_id[:8]} started (PID {bridge.child_pid}) in {cwd}")
+
+    # Save terminal settings
+    fd = sys.stdin.fileno()
+    old_settings = termios.tcgetattr(fd)
+
+    # Connect to daemon
+    SOCKET_PATH = os.path.expanduser("~/.cctg/data/cctg.sock")
+    sock = None
+    try:
+        if os.path.exists(SOCKET_PATH):
+            sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            sock.connect(SOCKET_PATH)
+            sock.setblocking(False)
+            msg = f"REGISTER|{session_id}|{cwd}|{bridge.child_pid}\n"
+            sock.send(msg.encode())
+    except (FileNotFoundError, ConnectionRefusedError, OSError):
+        pass  # Daemon not running — session works without Telegram
+
+    try:
+        while bridge.is_alive():
+            # PTY master -> stdout + daemon
+            output = bridge.read_output()
+            if output:
+                sys.stdout.write(output)
+                sys.stdout.flush()
+                if sock:
+                    try:
+                        sock.send(f"OUTPUT|{session_id}|{len(output)}\n".encode())
+                        sock.send(output.encode())
+                    except (BlockingIOError, BrokenPipeError, OSError):
+                        pass
+
+            # stdin -> PTY master
+            r, _, _ = select.select([sys.stdin], [], [], 0.05)
+            if r:
+                data = os.read(fd, 1024)
+                if data:
+                    os.write(bridge.master_fd, data)
+
+            # Daemon socket -> PTY master
+            if sock:
+                r, _, _ = select.select([sock], [], [], 0)
+                if r:
+                    try:
+                        msg = sock.recv(4096)
+                        if msg and msg.startswith(b"INPUT|"):
+                            parts = msg.split(b"|", 2)
+                            if len(parts) >= 3:
+                                os.write(bridge.master_fd, parts[2])
+                    except (BlockingIOError, BrokenPipeError, OSError):
+                        pass
+
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+        bridge.stop()
+        if sock:
+            try:
+                sock.send(f"UNREGISTER|{session_id}\n".encode())
+                sock.close()
+            except OSError:
+                pass
+        print(f"\r\n[cctg] Session {session_id[:8]} ended.")
+
+
 def cmd_install(args):
     """Run the installer script."""
     script = os.path.join(os.path.dirname(__file__), "..", "..", "install.sh")
@@ -143,6 +232,8 @@ def main():
     sub.add_parser("stop", help="Stop daemon")
     sub.add_parser("status", help="Show daemon status")
     sub.add_parser("restart", help="Restart daemon")
+    launch_parser = sub.add_parser("launch", help="Launch Claude Code session via PTY")
+    launch_parser.add_argument("profile", help="CCS profile name (e.g., lanit, deepseek)")
     sub.add_parser("daemon", help="Run daemon in foreground")
     sub.add_parser("install", help="Run interactive installer")
 
@@ -157,6 +248,8 @@ def main():
     elif args.command == "restart":
         cmd_stop(args)
         cmd_start(args)
+    elif args.command == "launch":
+        cmd_launch(args)
     elif args.command == "daemon":
         cmd_daemon(args)
     elif args.command == "install":
