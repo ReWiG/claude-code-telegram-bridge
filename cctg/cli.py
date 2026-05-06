@@ -151,9 +151,14 @@ def cmd_launch(args):
 
     print(f"[cctg] Session {session_id[:8]} started (PID {bridge.child_pid}) in {cwd}")
 
-    # Save terminal settings
+    # Save and set terminal to raw mode
     fd = sys.stdin.fileno()
     old_settings = termios.tcgetattr(fd)
+    new_settings = termios.tcgetattr(fd)
+    new_settings[3] = new_settings[3] & ~(termios.ECHO | termios.ICANON | termios.ISIG)
+    new_settings[6][termios.VMIN] = 1
+    new_settings[6][termios.VTIME] = 0
+    termios.tcsetattr(fd, termios.TCSANOW, new_settings)
 
     # Handle window resize
     def _handle_winch(signum, frame):
