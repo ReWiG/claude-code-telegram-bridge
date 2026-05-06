@@ -84,6 +84,18 @@ class Daemon:
                 if now - last_cleanup >= cleanup_interval:
                     await self.cleanup_worker._detect_exited_sessions()
                     last_cleanup = now
+                    # Auto-detach if attached session exited
+                    attached_id = await self.db.get_state("attached_session")
+                    if attached_id:
+                        s = await self.db.get_session(attached_id)
+                        if s and s["status"] == "exited":
+                            cwd = s.get("cwd", "?")
+                            was_tracking = await self.db.get_state("watch_active") == "1"
+                            await self.session_manager.detach()
+                            if was_tracking:
+                                await self.telegram.send_message(
+                                    f"🔌 <b>Сессия закрыта</b>\n📁 {cwd}\n\nОтслеживание и привязка автоматически сняты."
+                                )
 
                 await asyncio.sleep(1)
             except Exception as e:
@@ -137,12 +149,25 @@ class Daemon:
                 pass
 
     async def _process_pending_events(self) -> None:
+        # Only forward notifications when tracking is enabled
+        if not await self.session_manager.is_tracking():
+            # Still mark events as processed to clear queue
+            events = await self.db.get_unprocessed_events()
+            for event in events:
+                await self.db.mark_event_processed(event["id"])
+            return
+
         events = await self.db.get_unprocessed_events()
         for event in events:
             if event["type"] == "notification":
+                # Filter out false positives
+                payload = event.get("payload", "")
+                if "waiting for your input" in payload.lower():
+                    await self.db.mark_event_processed(event["id"])
+                    continue
                 session = await self.db.get_session(event["session_id"])
                 if session:
-                    await self.telegram.send_permission_prompt(session, event["payload"])
+                    await self.telegram.send_permission_prompt(session, payload)
             await self.db.mark_event_processed(event["id"])
 
     async def _poll_transcripts(self) -> None:

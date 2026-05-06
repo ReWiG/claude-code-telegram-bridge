@@ -153,28 +153,32 @@ class TelegramHandler:
         if not sessions:
             return "\U0001f7e2 Нет активных сессий Claude Code.", self._build_kb()
 
-        lines = ["\U0001f7e2 <b>Активные сессии Claude Code:</b>\n"]
+        lines = ["\U0001f7e2 <b>Активные сессии Claude Code:</b>"]
         for i, s in enumerate(sessions, 1):
             sid = s["session_id"][:8]
             cwd = s["cwd"]
-            branch = s.get("branch") or "—"
             tty = s.get("tty") or "—"
-            pname = s.get("project_name") or ""
-            lines.append(f"<b>#{i}</b>  {pname}  \U0001f4c1 {cwd}  \U0001f330 {branch}  \U0001f5a5 {tty}  \U0001f194 {sid}")
+            lines.append("")
+            lines.append(f"<b>#{i}</b>  \U0001f4c1 {cwd}  \U0001f5a5 {tty}  \U0001f194 {sid}")
 
         lines.append("")
         if attached_id:
             try:
                 idx = next(i for i, s in enumerate(sessions) if s["session_id"] == attached_id) + 1
-                attached_str = f"#{idx}"
+                attached_str = f"#{idx} ({sessions[idx-1]['cwd']})"
             except StopIteration:
                 attached_str = attached_id[:8]
         else:
             attached_str = "нет"
         watch_str = "вкл" if watch else "выкл"
-        lines.append(f"Прикреплён: {attached_str}  \U0001f441 Отслеживание: {watch_str}")
-        lines.append("\nВыбери сессию: /attach &lt;номер&gt;")
-        return "\n".join(lines), self._build_kb(attached=bool(attached_id), tracking=watch)
+        lines.append(f"\U0001f4ce Прикреплён: {attached_str}  \U0001f441 Отслеживание: {watch_str}")
+
+        # Inline keyboard for quick attach
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton(f"🔗 #{i}", callback_data=f"attach|{s['session_id']}")]
+            for i, s in enumerate(sessions, 1)
+        ])
+        return "\n".join(lines), kb
 
     async def _handle_attach(self, args: list[str]) -> tuple[str, dict]:
         if not args:
@@ -231,13 +235,14 @@ class TelegramHandler:
     async def _handle_help(self) -> tuple[str, dict]:
         text = (
             "\U0001f916 <b>cctg — Claude Code Telegram Bridge</b>\n\n"
-            "/list — показать активные сессии\n"
-            "/attach &lt;номер&gt; — выбрать сессию\n"
-            "/start_track — начать отслеживание\n"
+            "/list — список активных сессий\n"
+            "/attach &lt;номер&gt; — прикрепиться к сессии\n"
+            "/start_track — начать отслеживание (слежение за выводом)\n"
             "/stop_track — остановить отслеживание\n"
-            "/status — статус\n"
-            "/detach — открепиться\n"
-            "/help — это меню"
+            "/status — статус демона и привязки\n"
+            "/detach — открепиться от сессии\n"
+            "/help — это меню\n\n"
+            "<i>При прикреплении к сессии в /list появятся инлайн-кнопки для быстрого выбора.</i>"
         )
         return text, self._build_kb()
 
@@ -273,7 +278,28 @@ class TelegramHandler:
     async def _on_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         query = update.callback_query
         await query.answer()
-        await self.handle_callback(query.data)
+        data = query.data or ""
+
+        if data.startswith("attach|"):
+            # Handle attach via inline button
+            sid = data.split("|", 1)[1]
+            try:
+                await self.sm.attach(sid)
+                s = await self.db.get_session(sid)
+                cwd = s["cwd"] if s else "?"
+                await query.edit_message_text(
+                    text=query.message.text + f"\n\n✅ Прикреплён к {cwd}",
+                    parse_mode="HTML",
+                )
+            except ValueError as e:
+                await query.edit_message_text(
+                    text=query.message.text + f"\n\n❌ {e}",
+                    parse_mode="HTML",
+                )
+            return
+
+        # Handle allow/deny/allow_all
+        await self.handle_callback(data)
         await query.edit_message_text(
             text=query.message.text + "\n\n✅ Ответ отправлен.", parse_mode="HTML",
         )
