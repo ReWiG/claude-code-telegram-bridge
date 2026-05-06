@@ -183,8 +183,8 @@ def cmd_launch(args):
             sock.setblocking(False)
             msg = f"REGISTER|{session_id}|{cwd}|{bridge.child_pid}\n"
             sock.send(msg.encode())
-    except (FileNotFoundError, ConnectionRefusedError, OSError):
-        pass  # Daemon not running — session works without Telegram
+    except (FileNotFoundError, ConnectionRefusedError, OSError) as e:
+        print(f"[cctg] ⚠ Daemon not available ({e}) — session works without Telegram")
 
     try:
         while bridge.is_alive():
