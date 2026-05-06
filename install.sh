@@ -82,45 +82,7 @@ session_cleanup_seconds = 30
 TOMLEOF
 echo "✓ $INSTALL_DIR/config.toml записан"
 
-# 6. Install hooks to ~/.claude/settings.json
-SETTINGS_FILE="$HOME/.claude/settings.json"
-HOOKS_JSON=$(cat << 'HOOKSEOF'
-{
-  "hooks": {
-    "SessionStart": [
-      {"matcher": "", "hooks": [{"type": "command", "command": "HOOKS_DIR/session.py"}]}
-    ],
-    "Notification": [
-      {"matcher": "", "hooks": [{"type": "command", "command": "HOOKS_DIR/notify.py"}]}
-    ]
-  }
-}
-HOOKSEOF
-)
-HOOKS_JSON="${HOOKS_JSON//HOOKS_DIR/$INSTALL_DIR/hooks}"
-
-if [ -f "$SETTINGS_FILE" ]; then
-    cp "$SETTINGS_FILE" "${SETTINGS_FILE}.bak"
-    echo "✓ Бекап сохранён в ${SETTINGS_FILE}.bak"
-
-    python3 -c "
-import json
-with open('$SETTINGS_FILE') as f:
-    settings = json.load(f)
-new_hooks = json.loads('''$HOOKS_JSON''')['hooks']
-hooks = settings.setdefault('hooks', {})
-for key, value in new_hooks.items():
-    hooks.setdefault(key, []).extend(value)
-with open('$SETTINGS_FILE', 'w') as f:
-    json.dump(settings, f, indent=2)
-    f.write('\n')
-"
-else
-    echo "$HOOKS_JSON" > "$SETTINGS_FILE"
-fi
-echo "✓ Хуки прописаны в $SETTINGS_FILE"
-
-# 7. Create systemd user service
+# 6. Create systemd user service
 mkdir -p "$HOME/.config/systemd/user"
 cat > "$HOME/.config/systemd/user/cctg.service" << UNITEOF
 [Unit]
@@ -143,7 +105,7 @@ UNITEOF
 systemctl --user daemon-reload 2>/dev/null || true
 echo "✓ Systemd-сервис создан"
 
-# 8. Start
+# 7. Start
 read -r -p "Запустить демон сейчас? [Y/n]: " START
 if [ "$START" != "n" ] && [ "$START" != "N" ]; then
     systemctl --user enable --now cctg 2>/dev/null && echo "✓ Демон запущен" || {
