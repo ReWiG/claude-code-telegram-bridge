@@ -149,17 +149,16 @@ class Daemon:
                 pass
 
     async def _process_pending_events(self) -> None:
-        # Only forward notifications when tracking is enabled
-        if not await self.session_manager.is_tracking():
-            # Still mark events as processed to clear queue
-            events = await self.db.get_unprocessed_events()
-            for event in events:
-                await self.db.mark_event_processed(event["id"])
-            return
+        attached_id = await self.db.get_state("attached_session")
+        tracking = await self.db.get_state("watch_active") == "1"
 
         events = await self.db.get_unprocessed_events()
         for event in events:
             if event["type"] == "notification":
+                # Only forward if tracking AND notification is from attached session
+                if not tracking or event["session_id"] != attached_id:
+                    await self.db.mark_event_processed(event["id"])
+                    continue
                 # Filter out false positives
                 payload = event.get("payload", "")
                 if "waiting for your input" in payload.lower():
