@@ -54,8 +54,7 @@ class CleanupWorker:
                 branch=None, tty=None, pid=None,
             )
         elif event_type == "stop":
-            logger.info("Stop event for session %s (stop_hook_active=%s) — ignored, using /proc detection instead",
-                        session_id[:8], event.get("stop_hook_active"))
+            pass  # Stop hook removed — exit detection is done via /proc
         elif event_type == "notification":
             await self.db.add_pending_event(
                 session_id=session_id,

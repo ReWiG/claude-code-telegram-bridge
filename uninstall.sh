@@ -47,7 +47,7 @@ def has_cctg(hook_entry):
 with open('$SETTINGS_FILE') as f:
     settings = json.load(f)
 hooks = settings.get('hooks', {})
-for key in ('SessionStart', 'Notification', 'Stop'):
+for key in ('SessionStart', 'Notification'):
     if key in hooks:
         hooks[key] = [h for h in hooks[key] if not has_cctg(h)]
         if not hooks[key]:

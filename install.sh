@@ -92,9 +92,6 @@ HOOKS_JSON=$(cat << 'HOOKSEOF'
     ],
     "Notification": [
       {"matcher": "", "hooks": [{"type": "command", "command": "HOOKS_DIR/notify.py"}]}
-    ],
-    "Stop": [
-      {"matcher": "", "hooks": [{"type": "command", "command": "HOOKS_DIR/stop.py"}]}
     ]
   }
 }

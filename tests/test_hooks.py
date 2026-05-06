@@ -73,20 +73,3 @@ class TestNotifyHook:
         assert events[0]["type"] == "notification"
         assert events[0]["session_id"] == "abc123"
         assert "permission" in events[0]["message"]
-
-
-class TestStopHook:
-    def test_stop_writes_event(self):
-        result = run_hook("hooks/stop.py", {
-            "session_id": "abc123",
-            "transcript_path": "/home/user/.claude/projects/proj/abc123.jsonl",
-            "cwd": "/home/user/proj",
-            "hook_event_name": "Stop",
-            "stop_hook_active": False,
-        })
-        assert result.returncode == 0
-        events = read_events()
-        assert len(events) == 1
-        assert events[0]["type"] == "stop"
-        assert events[0]["session_id"] == "abc123"
-        assert events[0]["stop_hook_active"] is False
