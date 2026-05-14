@@ -121,6 +121,10 @@ class Daemon:
                     _, sid, length = line.split("|")
                     data = await reader.readexactly(int(length))
                     payload = json.loads(data.decode("utf-8", errors="replace"))
+                    # Only forward if this session is attached
+                    attached_id = await self.db.get_state("attached_session")
+                    if attached_id != sid:
+                        continue
                     s = await self.db.get_session(sid)
                     if s:
                         await self.telegram.send_permission_prompt(

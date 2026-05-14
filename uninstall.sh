@@ -26,20 +26,37 @@ if [ -f "$SETTINGS_FILE" ]; then
     python3 -c "
 import json
 
-def has_cctg(hook_entry):
-    for sub in hook_entry.get('hooks', []):
-        if 'cctg/hooks' in sub.get('command', ''):
-            return True
-    return 'cctg/hooks' in hook_entry.get('command', '')
+def strip_cctg(entry):
+    '''Remove cctg hooks from an entry. Returns None if entry should be removed entirely.'''
+    # New format: entry has hooks array with sub-hooks
+    if 'hooks' in entry:
+        new_hooks = [h for h in entry['hooks']
+                     if 'cctg/hooks' not in h.get('command', '')]
+        if new_hooks:
+            entry['hooks'] = new_hooks
+            return entry
+        return None
+    # Old format: entry itself is a hook command
+    if 'cctg/hooks' in entry.get('command', ''):
+        return None
+    return entry
 
 with open('$SETTINGS_FILE') as f:
     settings = json.load(f)
 hooks = settings.get('hooks', {})
 for key in list(hooks.keys()):
-    hooks[key] = [h for h in hooks[key] if not has_cctg(h)]
-    if not hooks[key]:
+    cleaned = []
+    for entry in hooks[key]:
+        result = strip_cctg(entry)
+        if result is not None:
+            cleaned.append(result)
+    if cleaned:
+        hooks[key] = cleaned
+    else:
         del hooks[key]
-if not hooks:
+if hooks:
+    settings['hooks'] = hooks
+else:
     settings.pop('hooks', None)
 with open('$SETTINGS_FILE', 'w') as f:
     json.dump(settings, f, indent=2, ensure_ascii=False)
