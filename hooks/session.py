@@ -12,6 +12,7 @@ if not events_file:
     sys.exit(0)
 
 event = {
+    "type": "session",
     "session_id": data.get("session_id", ""),
     "cwd": data.get("cwd", ""),
     "transcript_path": data.get("transcript_path", ""),

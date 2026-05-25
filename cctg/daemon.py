@@ -129,6 +129,7 @@ class Daemon:
                     if s:
                         await self.telegram.send_permission_prompt(
                             s, payload.get("msg", ""), payload.get("tool_use"),
+                            payload.get("pty_options"),
                         )
                 elif line.startswith("OUTPUT|") and session_id:
                     _, sid, length = line.split("|")
@@ -144,6 +145,7 @@ class Daemon:
                     attached_id = await self.db.get_state("attached_session")
                     if attached_id == sid:
                         await self.session_manager.detach()
+                        self.telegram.clear_active_perm()
                         s = await self.db.get_session(sid)
                         cwd = s["cwd"] if s else "?"
                         await self.telegram.send_message(
@@ -165,6 +167,7 @@ class Daemon:
                     attached_id = await self.db.get_state("attached_session")
                     if attached_id == session_id:
                         await self.session_manager.detach()
+                        self.telegram.clear_active_perm()
                         cwd = s["cwd"]
                         await self.telegram.send_message(
                             f"🔌 <b>Сессия закрыта</b>\n📁 {cwd}\n\n"

@@ -225,12 +225,14 @@ def cmd_launch(args):
             sock.connect(SOCKET_PATH)
             sock.setblocking(False)
             msg = f"REGISTER|{session_id}|{cwd}|{bridge.child_pid}\n"
-            sock.send(msg.encode())
+            _sock_send_all(sock,msg.encode())
     except (FileNotFoundError, ConnectionRefusedError, OSError) as e:
         print(f"[cctg] ⚠ Daemon not available ({e}) — session works without Telegram")
 
     events_offset = 0
-    notify_sent: set[str] = set()  # dedup tool_use IDs sent to daemon
+    pty_buffer = ""  # recent PTY output for parsing permission dialog options
+    last_sent_hash: str | None = None  # dedup by options content
+    monitor_until = 0  # keep monitoring buffer until this timestamp
     try:
         while bridge.is_alive():
             # PTY master -> stdout only (local terminal)
@@ -238,24 +240,47 @@ def cmd_launch(args):
             if output:
                 sys.stdout.write(output)
                 sys.stdout.flush()
+                pty_buffer = (pty_buffer + output)[-3000:]
+
+            # Continuous dialog monitoring: when a permission prompt fires,
+            # we keep parsing the buffer and send updates whenever the
+            # dialog changes (Ink replaces the active dialog on screen).
+            # Each successful send extends the monitoring window.
+            now = time.time()
+            if sock and now < monitor_until:
+                options, dialog = _parse_permission_dialog(pty_buffer)
+                if options is not None:
+                    h = str(options)
+                    if h != last_sent_hash:
+                        last_sent_hash = h
+                        tu = watcher.last_tool_use or {}
+                        payload = json.dumps({
+                            "msg": dialog or "",
+                            "tool_use": tu,
+                            "pty_options": options,
+                        }, ensure_ascii=False)
+                        data = payload.encode()
+                        _sock_send_all(sock, f"NOTIFY|{session_id}|{len(data)}\n".encode())
+                        _sock_send_all(sock, data)
+                        monitor_until = now + 1.5  # extend window
 
             # Transcript -> daemon (clean model output for Telegram)
             if sock and watcher.find_session_file():
                 flush, text, tool_use = watcher.read_new_text()
                 if flush:
                     try:
-                        sock.send(f"FLUSH|{session_id}\n".encode())
+                        _sock_send_all(sock,f"FLUSH|{session_id}\n".encode())
                     except (BlockingIOError, BrokenPipeError, OSError):
                         pass
                 if text:
                     try:
                         data = text.encode()
-                        sock.send(f"OUTPUT|{session_id}|{len(data)}\n".encode())
-                        sock.send(data)
+                        _sock_send_all(sock,f"OUTPUT|{session_id}|{len(data)}\n".encode())
+                        _sock_send_all(sock,data)
                     except (BlockingIOError, BrokenPipeError, OSError):
                         pass
 
-            # Events file -> only permission_prompt (filters out auto-accepted tools)
+            # Events file — session starts and permission prompts
             if sock:
                 try:
                     size = os.path.getsize(events_file)
@@ -267,19 +292,31 @@ def cmd_launch(args):
                                     ev = json.loads(line.strip())
                                 except (json.JSONDecodeError, ValueError):
                                     continue
-                                if ev.get("type") != "notification":
-                                    continue
-                                if ev.get("notification_type") != "permission_prompt":
-                                    continue
-                                tu = watcher.last_tool_use
-                                if tu:
-                                    tu_id = tu.get("id", "")
-                                    if tu_id and tu_id not in notify_sent:
-                                        notify_sent.add(tu_id)
-                                        payload = json.dumps({"msg": ev.get("message", ""), "tool_use": tu}, ensure_ascii=False)
-                                        data = payload.encode()
-                                        sock.send(f"NOTIFY|{session_id}|{len(data)}\n".encode())
-                                        sock.send(data)
+                                ev_type = ev.get("type", "")
+                                if ev_type == "session":
+                                    new_sid = ev.get("session_id", "")
+                                    new_transcript = ev.get("transcript_path", "")
+                                    if new_sid and new_sid != session_id:
+                                        # Session changed (/new or /clear) — re-register
+                                        try:
+                                            _sock_send_all(sock,f"UNREGISTER|{session_id}\n".encode())
+                                        except (BlockingIOError, BrokenPipeError, OSError):
+                                            pass
+                                        session_id = new_sid
+                                        watcher = TranscriptWatcher(new_transcript) if new_transcript else TranscriptWatcher(cwd=cwd)
+                                        msg = f"REGISTER|{session_id}|{cwd}|{bridge.child_pid}\n"
+                                        try:
+                                            _sock_send_all(sock,msg.encode())
+                                        except (BlockingIOError, BrokenPipeError, OSError):
+                                            pass
+                                        print(f"\r\n[cctg] Session changed: {session_id[:8]}")
+                                elif ev_type == "notification":
+                                    if ev.get("notification_type") != "permission_prompt":
+                                        continue
+                                    # Start monitoring — dialog will be picked up by the
+                                    # continuous monitor loop above
+                                    monitor_until = time.time() + 3.0
+                                    last_sent_hash = None
                             events_offset = f.tell()
                 except OSError:
                     pass
@@ -317,11 +354,106 @@ def cmd_launch(args):
         bridge.stop()
         if sock:
             try:
-                sock.send(f"UNREGISTER|{session_id}\n".encode())
+                _sock_send_all(sock,f"UNREGISTER|{session_id}\n".encode())
                 sock.close()
             except OSError:
                 pass
         print(f"\r\n[cctg] Session {session_id[:8]} ended.")
+
+
+def _clean_ansi(text: str) -> str:
+    """Strip ANSI and normalise cursor movement to newlines."""
+    import re
+    clean = re.sub(r'\x1b\[\d+;\d+[Hf]', '\n', text)
+    clean = re.sub(r'\x1b\[\d+[BE]', '\n', clean)
+    clean = re.sub(r'\x1b\[\d+[GC]', ' ', clean)
+    clean = re.sub(r'\x1b\[[\x30-\x3f]*[\x20-\x2f]*[\x40-\x7e]', '', clean)
+    clean = re.sub(r'\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)', '', clean)
+    clean = re.sub(r'\x1b[^\[\]][\x20-\x7e]', '', clean)
+    clean = re.sub(r'  +', ' ', clean)
+    return re.sub(r'\n{3,}', '\n\n', clean)
+
+
+def _sock_send_all(sock, data: bytes) -> bool:
+    """Send all bytes on a non-blocking socket, handling partial writes."""
+    import errno
+    total = 0
+    while total < len(data):
+        try:
+            n = sock.send(data[total:])
+            if n > 0:
+                total += n
+        except (BlockingIOError, InterruptedError):
+            continue
+        except OSError as e:
+            if e.errno == errno.EAGAIN:
+                continue
+            return False
+    return True
+
+
+def _parse_permission_dialog(pty_output: str) -> tuple[list[str] | None, str | None]:
+    """Parse the MOST RECENT permission dialog from PTY output.
+
+    When multiple subagent permissions overlap, Ink re-renders dialogs
+    and the buffer contains fragments of several.  We find the *last*
+    group of consecutive numbered options and the text preceding it.
+
+    Returns (option_labels, dialog_text).  Each is None if not found.
+    """
+    import re
+    clean = _clean_ansi(pty_output)
+    lines = clean.split('\n')
+
+    # Collect all numbered option lines: (line_index, number, label)
+    hits = []
+    for i, raw in enumerate(lines):
+        line = raw.rstrip('\r')
+        # Number may have a dot (1.) or just space (1 Yes) — Ink varies
+        m = re.match(r'[\s❯▶►▸▹▪▸•·]*([1-9])\.?\s*(.+)', line)
+        if not m:
+            continue
+        label = m.group(2).strip()
+        label = re.sub(r'^[○◉◯❍●✓✔☐☑☒▢▣◇◆◈◊⊕⊗⊙⊚⊛∙∘⋆∗]+', '', label).strip()
+        # Filter out non-permission lines (status bar "1 0", etc.)
+        if label and re.search(r'(?i)\b(yes|no|allow|deny|proceed|cancel|don\'?t)\b', label):
+            hits.append((i, int(m.group(1)), label))
+
+    if len(hits) < 2:
+        return None, None
+
+    # Group consecutive hits (gap ≤ 2 non-matching lines)
+    groups = []
+    cur = [hits[0]]
+    for prev, h in zip(hits, hits[1:]):
+        if h[0] - prev[0] <= 3:
+            cur.append(h)
+        else:
+            groups.append(cur)
+            cur = [h]
+    groups.append(cur)
+
+    # Take the LAST group (most recent dialog)
+    last = groups[-1]
+    if len(last) < 2:
+        return None, None
+
+    last.sort(key=lambda x: x[1])
+    options = [lbl for _, _, lbl in last]
+
+    # Extract dialog text: lines before this group, back to the previous
+    # group (or buffer start), taking meaningful non-empty lines.
+    prev_end = groups[-2][-1][0] if len(groups) > 1 else 0
+    start = last[0][0]
+    prefix_lines = lines[prev_end:start]
+    meaningful = []
+    for raw in prefix_lines:
+        l = raw.rstrip('\r').strip()
+        if l and not l.startswith('●') and not l.startswith('⏵') and '─' not in l:
+            meaningful.append(l)
+    dialog = '\n'.join(meaningful[-3:]) if meaningful else None
+
+    return options, dialog
 
 
 def cmd_install(args):
