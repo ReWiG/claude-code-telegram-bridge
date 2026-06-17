@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import atexit
 import fcntl
 import json
 import logging
@@ -203,6 +204,29 @@ def cmd_launch(args):
     new_settings[6][termios.VTIME] = 0
     termios.tcsetattr(fd, termios.TCSANOW, new_settings)
 
+    # Best-effort terminal cleanup at interpreter exit. Covers the case where
+    # the main loop never reaches its `finally` (uncaught exception, hard
+    # crash, etc.). The normal `finally` block also calls these, but it is
+    # idempotent — running it twice is harmless.
+    def _restore_terminal():
+        try:
+            sys.stdout.write(
+                "\x1b[?25h"      # show cursor
+                "\x1b[?1049l"    # leave alternate screen buffer
+                "\x1b[0m"        # reset all attributes
+                "\x1b[2J"        # erase entire screen
+                "\x1b[H"         # move cursor to (1,1)
+            )
+            sys.stdout.flush()
+        except (OSError, ValueError):
+            pass
+        try:
+            termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+        except (termios.error, OSError, ValueError):
+            pass
+
+    atexit.register(_restore_terminal)
+
     # Handle window resize
     def _handle_winch(signum, frame):
         if bridge.master_fd:
@@ -350,7 +374,54 @@ def cmd_launch(args):
     except KeyboardInterrupt:
         pass
     finally:
-        termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+        # 1. Ask Claude Code to shut down gracefully. SIGHUP is the
+        #    conventional "terminal disconnected" signal; TUI apps usually
+        #    handle it by leaving alternate screen, showing cursor, etc.
+        #    We give it up to ~1s, then fall through to a forced reset.
+        if bridge.child_pid:
+            try:
+                os.kill(bridge.child_pid, signal.SIGHUP)
+            except (OSError, ProcessLookupError):
+                pass
+            for _ in range(20):
+                if not bridge.is_alive():
+                    break
+                time.sleep(0.05)
+
+        # 2. Force the parent terminal back to a sane state. Claude Code
+        #    (Ink) enters the alternate screen buffer (\e[?1049h) and hides
+        #    the cursor (\e[?25l) on startup. When the child is killed by
+        #    signal it does NOT clean these up — the alternate buffer stays
+        #    active and the cursor stays hidden, so subsequent output ends
+        #    up overlaid on top of the old TUI. Reset everything we know
+        #    about BEFORE restoring termios so the escapes reach the tty
+        #    unfiltered.
+        try:
+            sys.stdout.write(
+                "\x1b[?25h"      # show cursor
+                "\x1b[?1049l"    # leave alternate screen buffer
+                "\x1b[0m"        # reset all attributes (colors, bold, etc.)
+                "\x1b[2J"        # erase entire screen
+                "\x1b[H"         # move cursor to (1,1)
+            )
+            sys.stdout.flush()
+        except (OSError, ValueError):
+            pass
+
+        # 3. Restore original terminal attributes.
+        try:
+            termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+        except termios.error:
+            pass
+
+        # 4. Reset SIGWINCH to default so we don't keep mutating the (now
+        #    closed) master fd if the parent shell sends a resize during
+        #    interpreter shutdown.
+        try:
+            signal.signal(signal.SIGWINCH, signal.SIG_DFL)
+        except (OSError, ValueError):
+            pass
+
         bridge.stop()
         if sock:
             try:
