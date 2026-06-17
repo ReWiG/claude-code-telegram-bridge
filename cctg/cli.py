@@ -187,9 +187,12 @@ def cmd_launch(args):
 
     watcher = TranscriptWatcher(transcript_path) if transcript_path else TranscriptWatcher(cwd=cwd)
 
-    print(f"[cctg] Session ID: {session_id}")
-    print(f"[cctg] PID:       {bridge.child_pid}")
-    print(f"[cctg] CWD:       {cwd}")
+    # These are written before the main TUI loop, but Claude Code can already
+    # have started emitting escape sequences by the time we reach this point.
+    # Use stderr to avoid corrupting the Ink renderer.
+    print(f"[cctg] Session ID: {session_id}", file=sys.stderr)
+    print(f"[cctg] PID:       {bridge.child_pid}", file=sys.stderr)
+    print(f"[cctg] CWD:       {cwd}", file=sys.stderr)
 
     # Save and set terminal to raw mode
     fd = sys.stdin.fileno()
@@ -251,7 +254,10 @@ def cmd_launch(args):
             msg = f"REGISTER|{session_id}|{cwd}|{bridge.child_pid}\n"
             _sock_send_all(sock,msg.encode())
     except (FileNotFoundError, ConnectionRefusedError, OSError) as e:
-        print(f"[cctg] ⚠ Daemon not available ({e}) — session works without Telegram")
+        # Use stderr — Claude Code's TUI owns stdout while it runs, and any
+        # stray write there ends up overlaid on top of the Ink renderer
+        # during /new, /clear, etc.
+        print(f"[cctg] ⚠ Daemon not available ({e}) — session works without Telegram", file=sys.stderr)
 
     events_offset = 0
     pty_buffer = ""  # recent PTY output for parsing permission dialog options
@@ -321,7 +327,12 @@ def cmd_launch(args):
                                     new_sid = ev.get("session_id", "")
                                     new_transcript = ev.get("transcript_path", "")
                                     if new_sid and new_sid != session_id:
-                                        # Session changed (/new or /clear) — re-register
+                                        # Session changed (/new or /clear) — re-register.
+                                        # DO NOT print to stdout here: Claude Code is
+                                        # actively redrawing its TUI when /new fires,
+                                        # and any write to stdout during that window
+                                        # ends up overlaid on top of Ink's escape
+                                        # sequences. Log to stderr instead.
                                         try:
                                             _sock_send_all(sock,f"UNREGISTER|{session_id}\n".encode())
                                         except (BlockingIOError, BrokenPipeError, OSError):
@@ -333,7 +344,7 @@ def cmd_launch(args):
                                             _sock_send_all(sock,msg.encode())
                                         except (BlockingIOError, BrokenPipeError, OSError):
                                             pass
-                                        print(f"\r\n[cctg] Session changed: {session_id[:8]}")
+                                        print(f"[cctg] session changed → {session_id[:8]}", file=sys.stderr)
                                 elif ev_type == "notification":
                                     if ev.get("notification_type") != "permission_prompt":
                                         continue
