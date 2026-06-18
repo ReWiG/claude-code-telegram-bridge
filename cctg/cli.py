@@ -145,6 +145,8 @@ def cmd_launch(args):
         ccs_path = "ccs"
 
     cmd = [ccs_path, profile]
+    if getattr(args, "continue", False):
+        cmd.append("--continue")
     cwd = os.getcwd()
 
     from cctg.pty_bridge import PTYBridge
@@ -559,6 +561,11 @@ def main():
     sub.add_parser("restart", help="Restart daemon")
     launch_parser = sub.add_parser("launch", help="Launch Claude Code session via PTY")
     launch_parser.add_argument("profile", help="CCS profile name (e.g., lanit, deepseek)")
+    launch_parser.add_argument(
+        "--continue", "-c", dest="continue",
+        action="store_true",
+        help="Resume the most recent session for this profile",
+    )
     sub.add_parser("daemon", help="Run daemon in foreground")
     sub.add_parser("install", help="Run interactive installer")
 
