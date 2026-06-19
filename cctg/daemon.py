@@ -220,27 +220,55 @@ class Daemon:
 
     async def _main_loop(self) -> None:
         cleanup_interval = self.config.session_cleanup_seconds
+        archive_interval = 3600  # GC exited sessions / live_messages once an hour
         last_cleanup = 0
+        last_archive = 0
         while self._running:
             try:
                 now = time.time()
                 if now - last_cleanup >= cleanup_interval:
                     await self._cleanup_stale_sessions()
                     last_cleanup = now
+                if now - last_archive >= archive_interval:
+                    await self.db.cleanup_old_sessions()
+                    await self.db.cleanup_old_live_messages()
+                    last_archive = now
                 await asyncio.sleep(1)
             except Exception as e:
                 logger.error(f"Main loop error: {e}", exc_info=True)
                 await asyncio.sleep(5)
 
     async def _cleanup_stale_sessions(self) -> None:
-        """Mark sessions as exited if their bridge writer is disconnected."""
+        """Mark sessions as exited if their bridge writer is disconnected or PID is dead."""
         for sid, writer in list(self._bridge_writers.items()):
             if writer.is_closing():
                 self._bridge_writers.pop(sid, None)
                 s = await self.db.get_session(sid)
                 if s and s["status"] == "active":
-                    await self.db.set_session_status(sid, "exited")
-                    logger.info("Session %s stale (writer closed)", sid[:8])
+                    await self._mark_session_exited(sid, s["cwd"], reason="writer closed")
+
+        # Bridge may have died without sending UNREGISTER (e.g. kill -9 on the
+        # launch process). Detect by checking if the session's PID is still alive.
+        for s in await self.db.list_active_sessions():
+            sid = s["session_id"]
+            if sid in self._bridge_writers:
+                continue  # handled above
+            pid = s.get("pid")
+            if pid and not os.path.exists(f"/proc/{pid}"):
+                await self._mark_session_exited(sid, s["cwd"], reason=f"PID {pid} dead")
+
+    async def _mark_session_exited(self, sid: str, cwd: str, reason: str) -> None:
+        await self.db.set_session_status(sid, "exited")
+        logger.info("Session %s stale (%s)", sid[:8], reason)
+        attached_id = await self.db.get_state("attached_session")
+        if attached_id == sid:
+            await self.session_manager.detach()
+            self.telegram.clear_active_perm()
+            await self.telegram.send_message(
+                f"🔌 <b>Сессия закрыта</b>\n📁 {cwd}\n\n"
+                "Привязка автоматически снята.",
+                reply_markup=self.telegram._build_kb(attached=False),
+            )
 
     async def _ensure_dirs(self) -> None:
         install_dir = os.path.expanduser(self.config.install_dir)
