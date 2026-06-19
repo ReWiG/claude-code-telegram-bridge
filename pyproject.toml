@@ -14,6 +14,10 @@ dependencies = [
     "watchdog>=3.0",
     "tomli>=2.0; python_version < '3.11'",
     "pytest>=9.0.3",
+    # Transitive via httpx -> idna. Bumped to address GHSA-65pc-fj4g-8rjx
+    # (CVE-2026-45409, DoS via crafted idna.encode input). Remove once
+    # python-telegram-bot's own constraints pull idna >= 3.15.
+    "idna>=3.15",
 ]
 
 [tool.setuptools.packages.find]
